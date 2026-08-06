@@ -661,7 +661,7 @@ gfx_w != g_lw || gfx_h != g_lh ||  g_force_redraw ? (
   gfx_y=top_margin+1;
   hist_size ? while (
     // casrya: moved color change inside while loop due to sysex
-    gfx_r=0.7; gfx_g=0.7; gfx_b=0.73;
+    gfx_r=0.7; gfx_g=0.7; gfx_b=0.85;
     gfx_x=0;
     tnum1 = g_pos[ent_time] + g_pos[ent_blockoffs]/srate;
 
@@ -684,7 +684,11 @@ gfx_w != g_lw || gfx_h != g_lh ||  g_force_redraw ? (
     // against the actual header string character-by-character that Bus
     // now lands at column 19, Chan at 24, Type at 32 -- exactly matching
     // "   Seq  TimePos    Bus  Chan    Type            Ident" above.
+    // Seq/TimePos dimming, 6 Aug 2026: same grey as the "Log OFF" label,
+    // restored right after so Bus/Chan keep their original color.
+    gfx_r=0.6; gfx_g=0.6; gfx_b=0.6;
     gfx_printf(" %5d %8.3f    ", g_pos[ent_seq], tnum1);
+    gfx_r=0.7; gfx_g=0.7; gfx_b=0.85;
 
 // .... message bus and channel
     gfx_printf("%2d", g_pos[ent_bus]+1);
