@@ -264,6 +264,19 @@ log_active ?
       set_history_common();
     )
     :
+    // System Common/Real-Time skip, 6 Aug 2026: Clock/Start/Stop/
+    // Continue/Active Sensing/Reset/MTC Quarter Frame/Song Position/
+    // Song Select/Tune Request (0xF1-0xFF) all share status nibble
+    // 0xF, so they can't be told apart by the channel-message parsing
+    // below (which also assumes byte counts that don't match these --
+    // several have 0 or 1 data bytes, not 3) and their low nibble
+    // isn't a channel at all. Not logged for now; still passed through
+    // untouched below.
+    midi_buf[0] >= $xF1 ?
+    (
+      0; // not logged, just fall through to the pass-through send below
+    )
+    :
     // casrya: original code for normal non SysEx
     (
       // casrya: convert buf to msgs
