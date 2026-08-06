@@ -315,7 +315,7 @@ log_active ?
 );
 
 // ======================================================================
-@gfx 560 400
+@gfx 400 800
 // casrya: scale up based on assigned gfx_ext_retina value which is 1.75 for 175% scaling
 gfx_setfont(1, "Consolas", 16 * gfx_ext_retina);
 
@@ -558,8 +558,10 @@ gfx_w != g_lw || gfx_h != g_lh ||  g_force_redraw ? (
   g_logx = gfx_x;
   // Label switch, 6 Aug 2026: "Log" gates MIDI pass-through as well as
   // recording (see @block), so make that state visible in the label
-  // itself rather than relying on the dimmer color alone.
-  log_active ? gfx_printf("Log") : gfx_printf("Log OFF");
+  // itself rather than relying on the dimmer color alone. Padded to the
+  // same 7-char width as "Log OFF" so Clear/Notes/MPE don't shift right
+  // of it when the label text changes.
+  log_active ? gfx_printf("Log    ") : gfx_printf("Log OFF");
   g_logx_e = gfx_x;
 
   gfx_x += gfx_texth * 2; // casrya: add scaling
@@ -578,6 +580,25 @@ gfx_w != g_lw || gfx_h != g_lh ||  g_force_redraw ? (
 
   gfx_x += gfx_texth * 2; // casrya: add scaling
 
+  // Value position, 6 Aug 2026: moved left from 36 towards the other
+  // columns -- this single constant is the only thing to tune further.
+  // Computed here (before Note/MPE Filter) since the alignment below
+  // needs it.
+  val_pos_x = 28 * gfx_texth; // casrya: add scaling (was hardcoded 480)
+
+  // Note/MPE Filter alignment, 6 Aug 2026: shift both buttons together
+  // by the same delta (preserving their existing side-by-side spacing)
+  // so MPE Filter's own "Filter" text lands at the same x as the Value
+  // column header below. Real pixel widths via gfx_measurestr, not the
+  // gfx_texth approximation used elsewhere, since Consolas glyph width
+  // isn't equal to glyph height.
+  base_x = gfx_x;
+  gfx_measurestr("Note Filter", notefilter_w, tmp_h);
+  gfx_measurestr("MPE ", mpe_prefix_w, tmp_h);
+  natural_mpex = base_x + notefilter_w + gfx_texth * 2;
+  align_delta = (val_pos_x - mpe_prefix_w) - natural_mpex;
+  gfx_x += align_delta;
+
   // Filter switches, 5 Aug 2026: same button pattern as Log/Clear above.
   // Lit (brighter) means that message type is currently being hidden,
   // matching Log's own convention of brighter = engaged.
@@ -589,7 +610,7 @@ gfx_w != g_lw || gfx_h != g_lh ||  g_force_redraw ? (
   );
   gfx_r=gfx_g=gfx_b=filter_hide_notes ? 0.8 : 0.5;
   g_notesx = gfx_x;
-  gfx_printf("Notes");
+  gfx_printf("Note Filter");
   g_notesx_e = gfx_x;
 
   gfx_x += gfx_texth * 2;
@@ -602,10 +623,18 @@ gfx_w != g_lw || gfx_h != g_lh ||  g_force_redraw ? (
   );
   gfx_r=gfx_g=gfx_b=filter_hide_mpe ? 0.8 : 0.5;
   g_mpex = gfx_x;
-  gfx_printf("MPE");
+  gfx_printf("MPE Filter");
   g_mpex_e = gfx_x;
 
-  val_pos_x = 36 * gfx_texth; // casrya: add scaling (was hardcoded 480)
+  // Button-row band, 6 Aug 2026: light green, translucent strip under
+  // Log/Clear/Note Filter/MPE Filter, separating them from the column
+  // header below. gfx_a is restored to 1 right after so it doesn't
+  // bleed into the header text or row drawing that follows.
+  gfx_r=0.5; gfx_g=1.0; gfx_b=0.5; gfx_a=0.35;
+  gfx_x=0; gfx_y=top_margin/2 - 3;
+  gfx_rectto(g_mpex_e, top_margin/2);
+  gfx_a=1;
+  gfx_y=2; // casrya: restore so the header line's += below lands correctly
 
   gfx_x =0; gfx_y += gfx_texth + 2; // casrya: add scaling
   gfx_printf("   Seq  TimePos    Bus  Chan    Type            Ident");
