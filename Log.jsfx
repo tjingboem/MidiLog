@@ -556,7 +556,10 @@ gfx_w != g_lw || gfx_h != g_lh ||  g_force_redraw ? (
   gfx_x=0;
   gfx_y=2;
   g_logx = gfx_x;
-  gfx_printf("Log");
+  // Label switch, 6 Aug 2026: "Log" gates MIDI pass-through as well as
+  // recording (see @block), so make that state visible in the label
+  // itself rather than relying on the dimmer color alone.
+  log_active ? gfx_printf("Log") : gfx_printf("Log OFF");
   g_logx_e = gfx_x;
 
   gfx_x += gfx_texth * 2; // casrya: add scaling
