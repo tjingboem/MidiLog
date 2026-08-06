@@ -741,6 +741,15 @@ gfx_w != g_lw || gfx_h != g_lh ||  g_force_redraw ? (
           gfx_x = (val_pos_x-gfx_texth); // casrya: add scaling
           pb_value > 0 ? gfx_printf("+%4d", pb_value)
                        : gfx_printf("%5d",  pb_value);
+      ):
+      // Chan Press value fix, 6 Aug 2026: Channel Pressure is a 2-byte
+      // message (status + 1 data byte), so its value lives in msg2
+      // (still held in dnum2 from the note/CC-name section above) --
+      // msg3 was never set and stays 0, which is what g_msg&255 below
+      // reads for every other type.
+      dnum1 == 13 ? (
+          gfx_x = val_pos_x; // casrya: add scaling
+          gfx_printf("%3d", dnum2);
       ):(
           gfx_x = val_pos_x; // casrya: add scaling
           gfx_printf("%3d", g_msg&255);
