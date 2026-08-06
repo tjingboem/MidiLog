@@ -1,4 +1,4 @@
-desc:MIDI Logger
+desc:MIDI Log
 // version 04 (v02 DS)
 //tags: MIDI analysis utility
 // .... pimped by DarkStar, July 2018
@@ -191,6 +191,29 @@ g_capst=0;
 g_at_end = 1;
 g_force_redraw=1;
 
+// Filter switches, 5 Aug 2026: hide rows at display time, not capture
+// time -- history keeps everything, the switches just choose what's
+// currently visible, so toggling never loses already-captured data.
+filter_hide_notes = 0;
+filter_hide_mpe   = 0;
+
+// "Only print when it changes", 5 Aug 2026: last-seen value per channel
+// for each of the three MPE controllers, so a captured message can be
+// flagged as an exact repeat at capture time. Sentinel -1 so the very
+// first message on any channel always counts as a change. Placed at a
+// high address, well clear of hist's range (hist tops out well under
+// 100000 given hist_max = 10000*ent_size and ent_size = 7).
+mpe_last_pb   = 500000; // 16 slots, pitch bend
+mpe_last_cc74 = 500020; // 16 slots
+mpe_last_cp   = 500040; // 16 slots
+i = 0;
+loop(16,
+  mpe_last_pb[i]   = -1;
+  mpe_last_cc74[i] = -1;
+  mpe_last_cp[i]   = -1;
+  i += 1;
+);
+
 gfx_clear=-1;
 
 load_CC_names();
@@ -255,9 +278,32 @@ log_active ?
         hist_size = hist_max - hist_chunk;
       );
 
+      // "Only print when it changes", 5 Aug 2026: flag this entry as a
+      // duplicate (bit 24, safely above msg1/msg2/msg3's packed range
+      // of bits 0-23) if it repeats the last value seen for this exact
+      // controller + channel. is_entry_hidden() reads this flag to hide
+      // repeats whenever MPE data is visible, regardless of the Hide
+      // MPE switch's own state.
+      mtype_cap = (msg1>>4)&15;
+      mchan_cap = msg1 & 15;
+      is_dup_cap = 0;
+      mtype_cap == 14 ? (
+        mval_cap = msg2 | (msg3<<7);
+        mval_cap == mpe_last_pb[mchan_cap] ? is_dup_cap = 1;
+        mpe_last_pb[mchan_cap] = mval_cap;
+      ) : mtype_cap == 13 ? (
+        mval_cap = msg2;
+        mval_cap == mpe_last_cp[mchan_cap] ? is_dup_cap = 1;
+        mpe_last_cp[mchan_cap] = mval_cap;
+      ) : mtype_cap == 11 && msg2 == 74 ? (
+        mval_cap = msg3;
+        mval_cap == mpe_last_cc74[mchan_cap] ? is_dup_cap = 1;
+        mpe_last_cc74[mchan_cap] = mval_cap;
+      );
+
       // casrya: calc msg23 for original usage
       msg23 = msg2 + (msg3 * 256);
-      hist[hist_size+ent_midiinfo] = msg1 + msg23*256;
+      hist[hist_size+ent_midiinfo] = msg1 + msg23*256 + (is_dup_cap ? 16777216 : 0);
       // casrya: not a SysEx
       hist[hist_size+ent_sysex_cnt] = 0;
       // casrya: extracted for SysEx
@@ -323,17 +369,81 @@ function print_sysex() local (sysex_cnt, i, val)
   sysex_cnt > 8 ? gfx_printf(" ...");
 );
 
+// Filter switches, 5 Aug 2026: shared classification, used both by the
+// draw loop (to skip hidden rows) and by find_auto_follow_pos() below
+// (to fix the "flickers, stuck on one spot" bug -- see that function's
+// comment for why it exists).
+// Bug fix, 5 Aug 2026: this originally read the CC NUMBER as
+// (msg>>16)&127, which is actually the low 7 bits of msg3 -- the CC
+// VALUE, not msg2, the CC number. That meant "Hide MPE" was matching
+// any CC message whose current VALUE happened to be 74, and missing
+// real CC74 messages whenever their value wasn't 74. msg2 (the real CC
+// number) sits at bits 8-15, i.e. (msg>>8)&255.
+function is_entry_hidden(ptr)
+local(msg, mtype, mnum, is_dup, is_mpe_type)
+(
+  msg = ptr[ent_midiinfo];
+  mtype = (msg/16)&15;
+  mnum  = (msg>>8)&255;
+  is_dup = (msg>>24)&1;
+  is_mpe_type = mtype == 13 || mtype == 14 || (mtype == 11 && mnum == 74);
+  ptr[ent_sysex_cnt] == 0 && (
+    (filter_hide_notes && (mtype == 8 || mtype == 9))
+    || (filter_hide_mpe && is_mpe_type)
+    // "only print when it changes", 5 Aug 2026: an MPE entry flagged as
+    // an exact repeat of the previous value for its own channel (set at
+    // capture time, see set_history_common() call site) is hidden
+    // regardless of the Hide MPE switch's own state -- deduplication is
+    // useful any time MPE data is visible at all, not just in isolation.
+    || (is_dup && is_mpe_type)
+  );
+);
+
+// Filter switches, 5 Aug 2026: the auto-follow "show the latest" position
+// used to be plain arithmetic -- g_histsize - g_viewsize -- entirely
+// unaware of filtering. With Notes hidden, notes still dominate the RAW
+// entry count, so "the last g_viewsize raw entries" was almost always
+// nearly all-hidden, leaving zero or one visible row in view. Because
+// that raw position shifts forward by one on every single incoming note
+// (hidden or not), the one visible row that did fall in range kept
+// jumping and redrawing right under the header on every redraw --
+// tjingboem's "flickers... printed on the same spot." Fix: walk
+// backward from the newest entry counting only VISIBLE ones until
+// g_viewsize are found (or history runs out), so the auto-follow window
+// is sized in on-screen rows, not raw log entries. With both filters
+// off this is exactly equivalent to the old arithmetic.
+function find_auto_follow_pos()
+local(idx, visible_count)
+(
+  idx = g_histsize;
+  visible_count = 0;
+  while (
+    idx > 0 && visible_count < g_viewsize ? (
+      idx -= 1;
+      !is_entry_hidden(hist + idx * ent_size) ? visible_count += 1;
+      1;
+    ) : 0;
+  );
+  idx;
+);
+
 // -------------------------------------------------------------
 top_margin=(gfx_texth + 4.0) * 2;
 scroll_width = top_margin /2;
 g_histsize = ((hist_size/ent_size)|0);
 g_viewsize = (((gfx_h-top_margin-1)/(gfx_texth+2))|0);
 
-g_pos = g_histsize - g_viewsize;
+// Filter switches, 5 Aug 2026: auto-follow now uses find_auto_follow_pos()
+// (walks backward counting only VISIBLE entries) instead of plain
+// g_histsize - g_viewsize arithmetic -- see that function's comment for
+// why the old arithmetic caused the "flickers on the same spot" bug
+// whenever a filter was hiding a large share of traffic. Manual-scroll
+// (not at_end) keeps the original raw-count clamp unchanged.
 g_at_end ? (
-  g_pos += 1;
+  g_pos = find_auto_follow_pos();
   g_scroll = g_pos;
 ) : (
+  g_pos = g_histsize - g_viewsize;
   g_pos > g_scroll ? g_pos = g_scroll;
 );
 
@@ -370,6 +480,15 @@ g_cap ? (
        g_scrollbar_top = top_margin+1 + g_pos * (gfx_h-top_margin-1) / g_histsize;
        g_scrollbar_bot = top_margin+1 + (g_pos + g_viewsize)*(gfx_h-top_margin-1)/g_histsize;    );
     g_capst=1;
+  ) :
+  // Filter switches, 5 Aug 2026: same toggle pattern as the Log button
+  g_cap == 5 && mouse_y < top_margin && mouse_X >= g_notesx && mouse_x <= g_notesx_e ? (
+    !(mouse_cap&1) ? filter_hide_notes = !filter_hide_notes;
+    g_capst=1;
+  ) :
+  g_cap == 6 && mouse_y < top_margin && mouse_X >= g_mpex && mouse_x <= g_mpex_e ? (
+    !(mouse_cap&1) ? filter_hide_mpe = !filter_hide_mpe;
+    g_capst=1;
   );
 
   !(mouse_cap&1) ? g_cap=0;
@@ -392,6 +511,12 @@ g_cap ? (
         ) : mouse_x >= g_clearx && mouse_x <= g_clearx_e ? (
           g_force_redraw=1;
           g_cap=3;
+        ) : mouse_x >= g_notesx && mouse_x <= g_notesx_e ? (
+          g_force_redraw=1;
+          g_cap=5;
+        ) : mouse_x >= g_mpex && mouse_x <= g_mpex_e ? (
+          g_force_redraw=1;
+          g_cap=6;
         );
       );
 
@@ -448,6 +573,35 @@ gfx_w != g_lw || gfx_h != g_lh ||  g_force_redraw ? (
   gfx_printf("Clear");
   g_clearx_e = gfx_x;
 
+  gfx_x += gfx_texth * 2; // casrya: add scaling
+
+  // Filter switches, 5 Aug 2026: same button pattern as Log/Clear above.
+  // Lit (brighter) means that message type is currently being hidden,
+  // matching Log's own convention of brighter = engaged.
+  g_cap == 5 && g_capst ? (
+    g_lx=gfx_x;
+    gfx_y=0; gfx_r=1; gfx_g=gfx_b=0; gfx_rectto(gfx_x+3*gfx_texth,top_margin/2);
+    gfx_x=g_lx;
+    gfx_y=2;
+  );
+  gfx_r=gfx_g=gfx_b=filter_hide_notes ? 0.8 : 0.5;
+  g_notesx = gfx_x;
+  gfx_printf("Notes");
+  g_notesx_e = gfx_x;
+
+  gfx_x += gfx_texth * 2;
+
+  g_cap == 6 && g_capst ? (
+    g_lx=gfx_x;
+    gfx_y=0; gfx_r=1; gfx_g=gfx_b=0; gfx_rectto(gfx_x+3*gfx_texth,top_margin/2);
+    gfx_x=g_lx;
+    gfx_y=2;
+  );
+  gfx_r=gfx_g=gfx_b=filter_hide_mpe ? 0.8 : 0.5;
+  g_mpex = gfx_x;
+  gfx_printf("MPE");
+  g_mpex_e = gfx_x;
+
   val_pos_x = 36 * gfx_texth; // casrya: add scaling (was hardcoded 480)
 
   gfx_x =0; gfx_y += gfx_texth + 2; // casrya: add scaling
@@ -478,13 +632,32 @@ gfx_w != g_lw || gfx_h != g_lh ||  g_force_redraw ? (
     gfx_r=0.7; gfx_g=0.7; gfx_b=0.73;
     gfx_x=0;
     tnum1 = g_pos[ent_time] + g_pos[ent_blockoffs]/srate;
+
+    // Filter switches, 5 Aug 2026: peek at the message type before any
+    // drawing happens, so a hidden row costs zero screen space -- the
+    // next visible row just moves up to fill the gap, rather than
+    // leaving a blank line. Shared classification with
+    // find_auto_follow_pos() above via is_entry_hidden(), so the two
+    // can't drift out of sync.
+    row_hidden = is_entry_hidden(g_pos);
+
+    !row_hidden ? (
     // casrya: use space chars instead of gfx_x for consistent spacing
-    gfx_printf(" %5d %8.3f  %4d       ", g_pos[ent_seq], tnum1, g_pos[ent_blockoffs]);
+    // Column-alignment fix, 5 Aug 2026: this used to also print
+    // g_pos[ent_blockoffs] as a raw "%4d" here, with no matching header
+    // label -- it's already folded into tnum1 above for the TimePos
+    // value, so printing it again just pushed every column after it
+    // (Bus/Chan/Type/Ident) several characters right of where the
+    // header says they should be. Removed the orphaned field; verified
+    // against the actual header string character-by-character that Bus
+    // now lands at column 19, Chan at 24, Type at 32 -- exactly matching
+    // "   Seq  TimePos    Bus  Chan    Type            Ident" above.
+    gfx_printf(" %5d %8.3f    ", g_pos[ent_seq], tnum1);
 
 // .... message bus and channel
     gfx_printf("%2d", g_pos[ent_bus]+1);
     g_msg = g_pos[ent_midiinfo];
-    gfx_printf("   %2d  ", (g_msg&15) +1);
+    gfx_printf("   %2d    ", (g_msg&15) +1);
 
     // casrya: Added SysEx (Max 8 bytes displayed)
     g_pos[ent_sysex_cnt] > 0 ?
@@ -539,6 +712,8 @@ gfx_w != g_lw || gfx_h != g_lh ||  g_force_redraw ? (
     ); // casrya: end non-sysex block
 
     gfx_y += gfx_texth+2;
+    ); // casrya: end !row_hidden block (filter switches, 5 Aug 2026)
+
     g_pos += ent_size;
     gfx_y < gfx_h && g_pos < hist + hist_size;
   );
