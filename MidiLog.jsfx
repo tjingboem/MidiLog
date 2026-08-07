@@ -404,63 +404,90 @@ local(Lname)
 );
 
 // -------------------------------------------------------------
-// Export, 7 Aug 2026: dumps the FULL captured history -- every entry in
-// hist[], regardless of the Note/MPE filter switches (those are a
-// viewing convenience only; export is meant to be the complete record)
-// -- as a tab-separated text block. Mirrors the @gfx draw loop's own
-// decoding of the packed ent_midiinfo field, but builds a string
-// instead of drawing.
+// Export, 7 Aug 2026, rewritten same day after hitting JSFX's ~16KB
+// per-string soft cap (confirmed against REAPER's own JSFX Strings
+// reference, not assumed): strcat() silently stops growing a string
+// past that size, no error -- the first version of this function built
+// one big string for the WHOLE history before handing it to gmem[],
+// so every export silently capped at ~16KB regardless of how much was
+// actually captured. Fix: write each row into gmem[] as it's built
+// (via gmem_write_str() below), using only small per-row strings that
+// never approach the limit, instead of accumulating everything first.
+//
+// Dumps the FULL captured history -- every entry in hist[], regardless
+// of the Note/MPE filter switches (those are a viewing convenience
+// only; export is meant to be the complete record) -- as a
+// tab-separated text block. Mirrors the @gfx draw loop's own decoding
+// of the packed ent_midiinfo field, but writes to gmem instead of
+// drawing.
 //
 // JSFX itself cannot write an arbitrary file to disk: file_open() is
 // read-only, and file_var/file_mem/file_string only work inside
 // @serialize, against the plugin's own state blob, not a chosen path.
 // JSFX also can't call REAPER API functions like SetExtState directly --
-// that's ReaScript-only. So this hands the text off via gmem[] instead
-// (see the byte-by-byte write at the end of this function), for the
-// companion Log_Export.lua script (a background watcher, Actions list)
-// to pick up and write out as a real .txt file.
+// that's ReaScript-only. So this hands the text off via gmem[] instead,
+// for the companion Log_Export.lua script (a background watcher,
+// Actions list) to pick up and write out as a real .txt file.
 // -------------------------------------------------------------
-function export_log()
-local(ptr, endptr, msg, dnum1, dnum2, tnum1, pb_value, sysex_cnt, si, val, exp_len, exp_i)
+function gmem_write_str(pos, str)
+local(n, k)
 (
-  strcpy(#exp_buf, "Seq\tTimePos\tBus\tChan\tType\tIdent\tValue\n");
+  n = strlen(str);
+  k = 0;
+  loop(n,
+    gmem[pos] = str_getchar(str, k);
+    pos += 1;
+    k += 1;
+  );
+  pos;
+);
+
+function export_log()
+local(ptr, endptr, msg, dnum1, dnum2, tnum1, pb_value, sysex_cnt, si, val, gpos)
+(
+  // gmem[0] = generation counter, gmem[1] = final length -- both written
+  // last, once the whole export is done, so the watcher never reads a
+  // partially-written buffer. Row text starts at gmem[2].
+  gpos = 2;
+  gpos = gmem_write_str(gpos, "Seq\tTimePos\tBus\tChan\tType\tIdent\tValue\n");
+
   ptr = hist;
   endptr = hist + hist_size;
   while (ptr < endptr) (
     tnum1 = ptr[ent_time] + ptr[ent_blockoffs]/srate;
     sprintf(#exp_line, "%d\t%.3f\t%d\t%d\t",
       ptr[ent_seq], tnum1, ptr[ent_bus]+1, (ptr[ent_midiinfo]&15)+1);
-    strcat(#exp_buf, #exp_line);
+    gpos = gmem_write_str(gpos, #exp_line);
 
     ptr[ent_sysex_cnt] > 0 ? (
       sysex_cnt = ptr[ent_sysex_cnt];
       sprintf(#exp_line, "SysEx\t%d bytes: ", sysex_cnt);
-      strcat(#exp_buf, #exp_line);
+      gpos = gmem_write_str(gpos, #exp_line);
       si = 0;
       loop(min(sysex_cnt, 8),
         si < 4 ? val = ptr[ent_midiinfo] >> (si * 8) & $xFF
           : val = ptr[ent_midiinfo2] >> ((si - 4) * 8) & $xFF;
         sprintf(#exp_line, "%02X ", val);
-        strcat(#exp_buf, #exp_line);
+        gpos = gmem_write_str(gpos, #exp_line);
         si += 1;
       );
-      strcat(#exp_buf, "\n");
+      gpos = gmem_write_str(gpos, "\n");
     ) : (
       msg = ptr[ent_midiinfo];
       dnum1 = (msg/16)&15;
       dnum2 = (msg>>16)&127;
 
-      dnum1 ==  9 && dnum2 > 0 ?   strcat(#exp_buf, "Note On\t")
-      : dnum1 ==  9 && dnum2 == 0 ? strcat(#exp_buf, "Note On (Off)\t")
-      : dnum1 ==  8 ?               strcat(#exp_buf, "Note Off\t")
-      : dnum1 == 10 ?               strcat(#exp_buf, "Poly After\t")
-      : dnum1 == 11 ?               strcat(#exp_buf, "CC\t")
-      : dnum1 == 12 ?               strcat(#exp_buf, "Prog Change\t")
-      : dnum1 == 13 ?               strcat(#exp_buf, "Chan Press\t")
-      : dnum1 == 14 ?               strcat(#exp_buf, "Pitch Wheel\t")
+      dnum1 ==  9 && dnum2 > 0 ?   gpos = gmem_write_str(gpos, "Note On\t")
+      : dnum1 ==  9 && dnum2 == 0 ? gpos = gmem_write_str(gpos, "Note On (Off)\t")
+      : dnum1 ==  8 ?               gpos = gmem_write_str(gpos, "Note Off\t")
+      : dnum1 == 10 ?               gpos = gmem_write_str(gpos, "Poly After\t")
+      : dnum1 == 11 ?               gpos = gmem_write_str(gpos, "CC\t")
+      : dnum1 == 12 ?               gpos = gmem_write_str(gpos, "Prog Change\t")
+      : dnum1 == 13 ?               gpos = gmem_write_str(gpos, "Chan Press\t")
+      : dnum1 == 14 ?               gpos = gmem_write_str(gpos, "Pitch Wheel\t")
       : dnum1 >  14 ? (
           sprintf(#exp_line, "#%02d\t", dnum1);
-          strcat(#exp_buf, #exp_line);
+          gpos = gmem_write_str(gpos, #exp_line);
         );
 
       msg /= 256;
@@ -469,17 +496,17 @@ local(ptr, endptr, msg, dnum1, dnum2, tnum1, pb_value, sysex_cnt, si, val, exp_l
       dnum1 < 13 ? (
         dnum1 == 11 ? (
           sprintf(#exp_line, "%d ", dnum2);
-          strcat(#exp_buf, #exp_line);
-          strcat(#exp_buf, dnum2+1);
+          gpos = gmem_write_str(gpos, #exp_line);
+          gpos = gmem_write_str(gpos, dnum2+1);
         ) : dnum1 > 10 ? (
           sprintf(#exp_line, "%d", dnum2);
-          strcat(#exp_buf, #exp_line);
+          gpos = gmem_write_str(gpos, #exp_line);
         ) : (
           note_name_text(#exp_line, dnum2);
-          strcat(#exp_buf, #exp_line);
+          gpos = gmem_write_str(gpos, #exp_line);
         );
       );
-      strcat(#exp_buf, "\t");
+      gpos = gmem_write_str(gpos, "\t");
 
       msg /= 256;
       dnum1 != 12 ? (
@@ -491,34 +518,17 @@ local(ptr, endptr, msg, dnum1, dnum2, tnum1, pb_value, sysex_cnt, si, val, exp_l
         ) : (
           sprintf(#exp_line, "%d", msg&255);
         );
-        strcat(#exp_buf, #exp_line);
+        gpos = gmem_write_str(gpos, #exp_line);
       );
-      strcat(#exp_buf, "\n");
+      gpos = gmem_write_str(gpos, "\n");
     );
 
     ptr += ent_size;
   );
 
-  // Export, 7 Aug 2026: JSFX can't call SetExtState (confirmed by
-  // compile error -- it's simply not part of the JSFX API surface, only
-  // ReaScript's), and it has no way to invoke a ReaScript action either.
-  // gmem[] is the actual documented bridge: this plugin's
-  // options:gmem=MidiLogExport header line names the shared
-  // buffer, and Log_Export.lua attaches to the same name via
-  // reaper.gmem_attach(). gmem only holds numbers, so the string is
-  // written out byte-by-byte: gmem[1] = length, gmem[2..length+1] = each
-  // character's byte value. gmem[0] is a generation counter, bumped on
-  // every export, so a background-deferred Lua watcher can tell a fresh
-  // click apart from re-reading the same data.
-  exp_len = strlen(#exp_buf);
   export_generation += 1;
+  gmem[1] = gpos - 2;
   gmem[0] = export_generation;
-  gmem[1] = exp_len;
-  exp_i = 0;
-  loop(exp_len,
-    gmem[exp_i+2] = str_getchar(#exp_buf, exp_i);
-    exp_i += 1;
-  );
 );
 
 // Filter switches, 5 Aug 2026: shared classification, used both by the
