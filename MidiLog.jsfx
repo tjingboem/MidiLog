@@ -9,6 +9,12 @@ desc:MIDI Log
 in_pin:none
 out_pin:none
 
+// Export, 7 Aug 2026: named gmem segment so Log_Export.lua can attach to
+// the same buffer via reaper.gmem_attach("MidiLogExport") -- JSFX
+// has no direct call into REAPER's own API (SetExtState etc. are not
+// reachable from plain JSFX), so gmem is the actual bridge.
+options:gmem=MidiLogExport
+
 // ======================================================================
 @init
 // added by casrya for HiDpi
@@ -382,6 +388,139 @@ function print_sysex() local (sysex_cnt, i, val)
   sysex_cnt > 8 ? gfx_printf(" ...");
 );
 
+// -------------------------------------------------------------
+// Export, 7 Aug 2026: text-only twin of print_note_name() above --
+// same note-name logic, but written into a string instead of drawn to
+// screen, for export_log() below.
+// -------------------------------------------------------------
+function note_name_text(out, PnoteX)
+local(Lname)
+(
+  Lname = (PnoteX % 12) * 2;
+  names[Lname+1] == $'#' ?
+    sprintf(out, "%c%c%d", names[Lname], names[Lname+1], floor(PnoteX/12) + FIRST_C)
+  :
+    sprintf(out, "%c%d", names[Lname], floor(PnoteX/12) + FIRST_C);
+);
+
+// -------------------------------------------------------------
+// Export, 7 Aug 2026: dumps the FULL captured history -- every entry in
+// hist[], regardless of the Note/MPE filter switches (those are a
+// viewing convenience only; export is meant to be the complete record)
+// -- as a tab-separated text block. Mirrors the @gfx draw loop's own
+// decoding of the packed ent_midiinfo field, but builds a string
+// instead of drawing.
+//
+// JSFX itself cannot write an arbitrary file to disk: file_open() is
+// read-only, and file_var/file_mem/file_string only work inside
+// @serialize, against the plugin's own state blob, not a chosen path.
+// JSFX also can't call REAPER API functions like SetExtState directly --
+// that's ReaScript-only. So this hands the text off via gmem[] instead
+// (see the byte-by-byte write at the end of this function), for the
+// companion Log_Export.lua script (a background watcher, Actions list)
+// to pick up and write out as a real .txt file.
+// -------------------------------------------------------------
+function export_log()
+local(ptr, endptr, msg, dnum1, dnum2, tnum1, pb_value, sysex_cnt, si, val, exp_len, exp_i)
+(
+  strcpy(#exp_buf, "Seq\tTimePos\tBus\tChan\tType\tIdent\tValue\n");
+  ptr = hist;
+  endptr = hist + hist_size;
+  while (ptr < endptr) (
+    tnum1 = ptr[ent_time] + ptr[ent_blockoffs]/srate;
+    sprintf(#exp_line, "%d\t%.3f\t%d\t%d\t",
+      ptr[ent_seq], tnum1, ptr[ent_bus]+1, (ptr[ent_midiinfo]&15)+1);
+    strcat(#exp_buf, #exp_line);
+
+    ptr[ent_sysex_cnt] > 0 ? (
+      sysex_cnt = ptr[ent_sysex_cnt];
+      sprintf(#exp_line, "SysEx\t%d bytes: ", sysex_cnt);
+      strcat(#exp_buf, #exp_line);
+      si = 0;
+      loop(min(sysex_cnt, 8),
+        si < 4 ? val = ptr[ent_midiinfo] >> (si * 8) & $xFF
+          : val = ptr[ent_midiinfo2] >> ((si - 4) * 8) & $xFF;
+        sprintf(#exp_line, "%02X ", val);
+        strcat(#exp_buf, #exp_line);
+        si += 1;
+      );
+      strcat(#exp_buf, "\n");
+    ) : (
+      msg = ptr[ent_midiinfo];
+      dnum1 = (msg/16)&15;
+      dnum2 = (msg>>16)&127;
+
+      dnum1 ==  9 && dnum2 > 0 ?   strcat(#exp_buf, "Note On\t")
+      : dnum1 ==  9 && dnum2 == 0 ? strcat(#exp_buf, "Note On (Off)\t")
+      : dnum1 ==  8 ?               strcat(#exp_buf, "Note Off\t")
+      : dnum1 == 10 ?               strcat(#exp_buf, "Poly After\t")
+      : dnum1 == 11 ?               strcat(#exp_buf, "CC\t")
+      : dnum1 == 12 ?               strcat(#exp_buf, "Prog Change\t")
+      : dnum1 == 13 ?               strcat(#exp_buf, "Chan Press\t")
+      : dnum1 == 14 ?               strcat(#exp_buf, "Pitch Wheel\t")
+      : dnum1 >  14 ? (
+          sprintf(#exp_line, "#%02d\t", dnum1);
+          strcat(#exp_buf, #exp_line);
+        );
+
+      msg /= 256;
+      dnum2 = msg&255;
+
+      dnum1 < 13 ? (
+        dnum1 == 11 ? (
+          sprintf(#exp_line, "%d ", dnum2);
+          strcat(#exp_buf, #exp_line);
+          strcat(#exp_buf, dnum2+1);
+        ) : dnum1 > 10 ? (
+          sprintf(#exp_line, "%d", dnum2);
+          strcat(#exp_buf, #exp_line);
+        ) : (
+          note_name_text(#exp_line, dnum2);
+          strcat(#exp_buf, #exp_line);
+        );
+      );
+      strcat(#exp_buf, "\t");
+
+      msg /= 256;
+      dnum1 != 12 ? (
+        dnum1 == 14 ? (
+          pb_value = dnum2 + (msg&255)*128 - (128*64);
+          sprintf(#exp_line, "%d", pb_value);
+        ) : dnum1 == 13 ? (
+          sprintf(#exp_line, "%d", dnum2);
+        ) : (
+          sprintf(#exp_line, "%d", msg&255);
+        );
+        strcat(#exp_buf, #exp_line);
+      );
+      strcat(#exp_buf, "\n");
+    );
+
+    ptr += ent_size;
+  );
+
+  // Export, 7 Aug 2026: JSFX can't call SetExtState (confirmed by
+  // compile error -- it's simply not part of the JSFX API surface, only
+  // ReaScript's), and it has no way to invoke a ReaScript action either.
+  // gmem[] is the actual documented bridge: this plugin's
+  // options:gmem=MidiLogExport header line names the shared
+  // buffer, and Log_Export.lua attaches to the same name via
+  // reaper.gmem_attach(). gmem only holds numbers, so the string is
+  // written out byte-by-byte: gmem[1] = length, gmem[2..length+1] = each
+  // character's byte value. gmem[0] is a generation counter, bumped on
+  // every export, so a background-deferred Lua watcher can tell a fresh
+  // click apart from re-reading the same data.
+  exp_len = strlen(#exp_buf);
+  export_generation += 1;
+  gmem[0] = export_generation;
+  gmem[1] = exp_len;
+  exp_i = 0;
+  loop(exp_len,
+    gmem[exp_i+2] = str_getchar(#exp_buf, exp_i);
+    exp_i += 1;
+  );
+);
+
 // Filter switches, 5 Aug 2026: shared classification, used both by the
 // draw loop (to skip hidden rows) and by find_auto_follow_pos() below
 // (to fix the "flickers, stuck on one spot" bug -- see that function's
@@ -502,6 +641,11 @@ g_cap ? (
   g_cap == 6 && mouse_y < top_margin && mouse_X >= g_mpex && mouse_x <= g_mpex_e ? (
     !(mouse_cap&1) ? filter_hide_mpe = !filter_hide_mpe;
     g_capst=1;
+  ) :
+  // Export, 7 Aug 2026: same click pattern as the other header buttons
+  g_cap == 7 && mouse_y < top_margin && mouse_X >= g_exportx && mouse_x <= g_exportx_e ? (
+    !(mouse_cap&1) ? export_log();
+    g_capst=1;
   );
 
   !(mouse_cap&1) ? g_cap=0;
@@ -530,6 +674,9 @@ g_cap ? (
         ) : mouse_x >= g_mpex && mouse_x <= g_mpex_e ? (
           g_force_redraw=1;
           g_cap=6;
+        ) : mouse_x >= g_exportx && mouse_x <= g_exportx_e ? (
+          g_force_redraw=1;
+          g_cap=7;
         );
       );
 
@@ -639,13 +786,32 @@ gfx_w != g_lw || gfx_h != g_lh ||  g_force_redraw ? (
   gfx_printf("MPE Filter");
   g_mpex_e = gfx_x;
 
+  gfx_x += gfx_texth * 2;
+
+  // Export, 7 Aug 2026: dumps the FULL captured history (every entry,
+  // ignoring the Note/MPE filters -- those are a viewing convenience,
+  // export is meant to be the complete record) to gmem[] for a
+  // companion ReaScript to write out as a real .txt file. See
+  // export_log() below for why this hand-off is needed instead of a
+  // direct file write.
+  g_cap == 7 && g_capst ? (
+    g_lx=gfx_x;
+    gfx_y=0; gfx_r=1; gfx_g=gfx_b=0; gfx_rectto(gfx_x+3*gfx_texth,top_margin/2);
+    gfx_x=g_lx;
+    gfx_y=2;
+  );
+  gfx_r=gfx_g=gfx_b=0.5;
+  g_exportx = gfx_x;
+  gfx_printf("Export");
+  g_exportx_e = gfx_x;
+
   // Button-row band, 6 Aug 2026: light green, translucent strip under
-  // Log/Clear/Note Filter/MPE Filter, separating them from the column
-  // header below. gfx_a is restored to 1 right after so it doesn't
-  // bleed into the header text or row drawing that follows.
+  // Log/Clear/Note Filter/MPE Filter/Export, separating them from the
+  // column header below. gfx_a is restored to 1 right after so it
+  // doesn't bleed into the header text or row drawing that follows.
   gfx_r=0.5; gfx_g=1.0; gfx_b=0.5; gfx_a=0.35;
   gfx_x=0; gfx_y=top_margin/2 - 3;
-  gfx_rectto(g_mpex_e, top_margin/2);
+  gfx_rectto(g_exportx_e, top_margin/2);
   gfx_a=1;
   gfx_y=2; // casrya: restore so the header line's += below lands correctly
 
