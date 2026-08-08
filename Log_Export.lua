@@ -88,8 +88,13 @@ local LABEL_MARGIN = string.rep(" ", 5)
 
 -- Shades black-key rows in the keyboard diagram, the same way a real DAW
 -- piano roll shades them, so the vertical axis reads like a keyboard at
--- a glance even before any notes are drawn on top of it.
-local BLACK_KEY_BG = "."
+-- a glance even before any notes are drawn on top of it. Changed from
+-- "." to "-" 8 Aug 2026 (tjingboem's request): a repeated "." read as
+-- busy (each dot a distinct small mark), and a plain "_" sat too low
+-- (baseline) to read as a calm shelf line -- "-" gives the same
+-- continuous-line effect while sitting at roughly the row's middle in
+-- most monospace fonts.
+local BLACK_KEY_BG = "-"
 
 -- Value diagrams became an 8-row area chart, 8 Aug 2026, replacing the
 -- single-row density-coded sparkline above: normalizing against the
@@ -260,14 +265,17 @@ end
 -- repeated digit; channels 10-16 repeat "/" + the ones digit (channel 13
 -- -> "/3/3/3..."). "/" is never itself a valid channel digit, so it
 -- can't collide with a same-digit single-channel neighbor -- and "."
--- was deliberately avoided for this marker (tjingboem's own catch)
--- since "." already means something else twice over in this same
--- diagram (BLACK_KEY_BG, and AREA_FILL_HALF in the value diagrams) --
--- a channel-13 note sitting on a black key would have its own marker
--- blend into the row's background. Known remaining edge case, accepted
--- as a tradeoff rather than solved: a very short bar for a 10-16
--- channel can still truncate down to just "/" or just the ones digit,
--- which does look like a single-channel note in that narrow case.
+-- was deliberately avoided for this marker at the time (tjingboem's own
+-- catch) since "." was then BLACK_KEY_BG as well as AREA_FILL_HALF in
+-- the value diagrams, and a channel-13 note sitting on a black key would
+-- have had its own marker blend into the row's background. BLACK_KEY_BG
+-- later moved to "-" (see that constant's own comment), so that specific
+-- collision no longer applies to the keyboard diagram, but "/" was kept
+-- rather than revisited -- no reason to reopen a settled choice. Known
+-- remaining edge case, accepted as a tradeoff rather than solved: a very
+-- short bar for a 10-16 channel can still truncate down to just "/" or
+-- just the ones digit, which does look like a single-channel note in
+-- that narrow case.
 local function channel_digit_glyphs(chan_str)
   local n = tonumber(chan_str)
   if n and n >= 10 then
@@ -336,6 +344,36 @@ local function build_time_ruler(duration)
   return table.concat(ruler)
 end
 
+-- Fills `width` columns starting at `col_start` with a channel's own fill
+-- pattern -- a repeated single digit for channels 1-9, or complete "/N"
+-- units (left-aligned, no trailing fragment) for channels 10-16. Shared
+-- between the bracket layer below and any bar too narrow to fit a
+-- bracket at all, so the two callers can't drift out of sync on what
+-- "the channel's own fill" actually looks like.
+local function fill_channel_span(cells, col_start, width, glyphs)
+  if width <= 0 then return end
+  if #glyphs == 1 then
+    for c = col_start, col_start + width - 1 do cells[c] = glyphs[1] end
+  elseif width < #glyphs then
+    -- Too narrow to show even one complete "/N" unit -- show just the
+    -- marker, honestly incomplete, rather than a bare digit that could
+    -- be misread as a different, single-digit channel.
+    cells[col_start] = glyphs[1]
+  else
+    -- Fill only complete "/N" units, left-aligned from the note's own
+    -- onset -- never end a bar on a bare fragment of the pattern
+    -- (tjingboem, after seeing it in real output: "truncated trailing /
+    -- is weird"). Any leftover column at the tail stays background, a
+    -- cleaner signal than a dangling half-symbol would be.
+    local complete_units = math.floor(width / #glyphs)
+    local gi = 0
+    for i = 1, complete_units * #glyphs do
+      gi = gi % #glyphs + 1
+      cells[col_start + i - 1] = glyphs[gi]
+    end
+  end
+end
+
 -- The keyboard/piano-roll diagram: one row per semitone from the highest
 -- to the lowest pitch actually captured, *including* semitones with no
 -- note at all -- a real keyboard has no gaps, and showing the true
@@ -344,6 +382,23 @@ end
 -- the whole point of merging channels into one diagram instead of many.
 -- Each note bar is filled with its own channel's bold digit(s), so
 -- channel identity survives the merge without needing separate rows.
+--
+-- Bracket boundaries, added 8 Aug 2026 (tjingboem's design): "[" marks a
+-- note's own onset and "]" its own release, reserved from the bar's own
+-- width rather than drawn on top of it -- e.g. a 4-column note on
+-- channel 8 is "[88]", not "8888". This is what actually answers "is
+-- this one long note or several short ones back to back": two adjacent
+-- short notes on the same pitch+channel now read as e.g. "[8][8]", with
+-- each note's own bracket pair staying visible, instead of merging into
+-- one indistinguishable run of digits -- which happened before even for
+-- genuinely back-to-back (zero-gap, fully legato) notes, since there was
+-- no rest for the old background-gap approach to render. A bar too
+-- narrow for both brackets keeps only the one tjingboem judged more
+-- useful to preserve (onset over release): 1 column shows just the
+-- digit (no room for any bracket), 2 columns shows "[" + the digit (open
+-- bracket kept, close bracket dropped), 3+ columns shows both brackets
+-- with the channel's own fill pattern -- via fill_channel_span above --
+-- in whatever's left between them.
 local function build_keyboard_diagram(bars, duration)
   if #bars == 0 then return nil end
 
@@ -370,25 +425,15 @@ local function build_keyboard_diagram(bars, duration)
     local cells = row_cells[bar.midi]
     local width = end_c - start_c + 1
 
-    if #glyphs == 1 then
-      for c = start_c, end_c do cells[c] = glyphs[1] end
-    elseif width < #glyphs then
-      -- Too narrow to show even one complete "/N" unit -- show just the
-      -- marker, honestly incomplete, rather than a bare digit that could
-      -- be misread as a different, single-digit channel.
-      cells[start_c] = glyphs[1]
+    if width == 1 then
+      fill_channel_span(cells, start_c, 1, glyphs)
+    elseif width == 2 then
+      cells[start_c] = "["
+      fill_channel_span(cells, start_c + 1, 1, glyphs)
     else
-      -- Fill only complete "/N" units, left-aligned from the note's own
-      -- onset -- never end a bar on a bare fragment of the pattern
-      -- (tjingboem, after seeing it in real output: "truncated trailing
-      -- / is weird"). Any leftover column at the tail stays background,
-      -- a cleaner signal than a dangling half-symbol would be.
-      local complete_units = math.floor(width / #glyphs)
-      local gi = 0
-      for i = 1, complete_units * #glyphs do
-        gi = gi % #glyphs + 1
-        cells[start_c + i - 1] = glyphs[gi]
-      end
+      cells[start_c] = "["
+      cells[end_c] = "]"
+      fill_channel_span(cells, start_c + 1, width - 2, glyphs)
     end
   end
 
@@ -401,7 +446,12 @@ local function build_keyboard_diagram(bars, duration)
   for midi = max_midi, min_midi, -1 do
     lines[#lines + 1] = string.format("%-4s ", midi_to_note_name(midi)) .. table.concat(row_cells[midi])
   end
-  lines[#lines + 1] = LABEL_MARGIN .. build_time_ruler(duration)
+  -- "seconds" appended right after the ruler, 8 Aug 2026 (tjingboem's
+  -- request): lands in the same column every value diagram's hi/lo
+  -- label starts in (both are LABEL_MARGIN + DIAGRAM_WIDTH columns in),
+  -- so the ruler's unit reads clearly without needing its own separate
+  -- label line.
+  lines[#lines + 1] = LABEL_MARGIN .. build_time_ruler(duration) .. "seconds"
   return table.concat(lines, "\n")
 end
 
@@ -444,10 +494,17 @@ local function build_value_diagram(group, duration)
   -- alignment with every other diagram's. LABEL_MARGIN keeps the actual
   -- data flush with the keyboard diagram's own left margin instead.
   -- Plain label, no "-- ... --" border or range suffix, 8 Aug 2026
-  -- (tjingboem's request), and no auto-scaled range shown either, even
-  -- though it's now real per-capture data rather than a fixed constant --
-  -- tjingboem's own framing: "the real numbers show the exact numbers,
-  -- the diagrams show evolution."
+  -- (tjingboem's request).
+  --
+  -- Hi/lo values added at the right edge, 8 Aug 2026 (tjingboem's
+  -- request, superseding the "diagrams show evolution, not numbers"
+  -- framing this used to follow): with the vertical scale auto-fit to
+  -- each group's own actual range, a reader has no way to tell what the
+  -- top and bottom of the chart actually correspond to just by looking
+  -- at it -- unlike the fixed 0-127 range this replaced, where the
+  -- extremes were always implicit. group.hi labels the top row, group.lo
+  -- the bottom, so the two numbers that matter most for reading the
+  -- shape are right there without cross-referencing the raw log rows.
   local lines = {}
   for r = 1, AREA_ROWS do
     local row = {}
@@ -459,9 +516,22 @@ local function build_value_diagram(group, duration)
         or (heights[c] >= half_threshold) and AREA_FILL_HALF
         or " "
     end
-    lines[#lines + 1] = LABEL_MARGIN .. table.concat(row)
+    local line = LABEL_MARGIN .. table.concat(row)
+    -- "--" instead of a plain space before the number, 8 Aug 2026
+    -- (tjingboem's request): reads as a leader/tick mark pointing from
+    -- the row into its value, making it visually clear the number is
+    -- the level at that row -- not just trailing text.
+    if r == 1 then
+      line = line .. "--" .. string.format("%d", group.hi)
+    elseif r == AREA_ROWS then
+      line = line .. "--" .. string.format("%d", group.lo)
+    end
+    lines[#lines + 1] = line
   end
-  lines[#lines + 1] = LABEL_MARGIN .. build_time_ruler(duration)
+  -- "seconds" appended right after the ruler, same column the hi/lo
+  -- labels above start in -- see the identical note in
+  -- build_keyboard_diagram.
+  lines[#lines + 1] = LABEL_MARGIN .. build_time_ruler(duration) .. "seconds"
   lines[#lines + 1] = group.label
   return table.concat(lines, "\n")
 end
@@ -483,10 +553,15 @@ local function build_diagrams(text)
   -- 3 blank lines of separation before the header, tjingboem's request --
   -- text (the raw log) already ends with its own trailing newline, so 3
   -- more newlines here is 3 full blank lines, not 4.
-  local out = { string.rep("\n", 3) .. string.rep("=", 20) .. " Diagrams " .. string.rep("=", 20) }
+  local out = { string.rep("\n", 3) .. "--- Diagrams ---" }
 
+  -- Extra trailing "\n" here, 8 Aug 2026 (tjingboem's request): the join
+  -- below already puts one blank line between every pair of entries in
+  -- `out` -- this adds a second blank line specifically after the
+  -- keyboard diagram, setting it apart from the value diagrams that
+  -- follow.
   local keyboard_diagram = build_keyboard_diagram(note_bars, duration)
-  if keyboard_diagram then out[#out + 1] = keyboard_diagram end
+  if keyboard_diagram then out[#out + 1] = keyboard_diagram .. "\n" end
 
   for _, key in ipairs(group_order) do
     local diagram = build_value_diagram(value_groups[key], duration)

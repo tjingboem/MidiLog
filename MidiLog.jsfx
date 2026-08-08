@@ -197,7 +197,6 @@ hist_chunk = 1000*ent_size; // advance
 // Set here too (not just on Clear) so a freshly loaded instance has a
 // sane origin from the start, before the user ever clicks Clear.
 clear_time_origin = time_precise();
-log_stop_elapsed = 0; // see the Log-button handler, and export_log()
 // casrya: uncomment to test history trimming with small history
 //hist_max = 10*ent_size;
 //hist_chunk = ent_size; // advance
@@ -470,11 +469,15 @@ local(ptr, endptr, msg, dnum1, dnum2, tnum1, pb_value, sysex_cnt, si, val, gpos,
   // captured event's own elapsed value re-bases everything to "since the
   // first note," which is what's actually meaningful to read.
   first_elapsed = hist_size > 0 ? hist[ent_elapsed] : 0;
-  // Duration line: elapsed time from the first note to when logging was
-  // deliberately stopped (Log button clicked off), or to now if logging
-  // is still active -- not to whenever Export happened to be clicked,
-  // which could be long after playing stopped.
-  duration_end = log_active ? (time_precise() - clear_time_origin) : log_stop_elapsed;
+  // Duration line, fixed 8 Aug 2026: elapsed time from the first captured
+  // note to the LAST captured note -- not to "now" (time_precise() at the
+  // moment Export was clicked), which overcounts by however long you sat
+  // idle after playing before clicking Export. hist[] only grows while
+  // log_active is true (see @gfx's capture gate), so the last entry's own
+  // ent_elapsed is already the correct stop point whether Log is still on,
+  // was switched off, or Export was clicked ages later -- no separate
+  // "Log OFF" bookkeeping needed.
+  duration_end = hist_size > 0 ? hist[hist_size - ent_size + ent_elapsed] : first_elapsed;
   sprintf(#exp_line, "Duration: %.3f seconds\n\n", duration_end - first_elapsed);
   gpos = gmem_write_str(gpos, #exp_line);
   gpos = gmem_write_str(gpos, "Seq\tTimePos\tElapsed\tBus\tChan\tType\tIdent\tValue\n");
@@ -660,22 +663,13 @@ g_cap ? (
     g_scrollbar_bot = top_margin+1 + (g_pos + g_viewsize)*(gfx_h-top_margin-1)/g_histsize;
   ) :
   g_cap == 4 && mouse_y < top_margin && mouse_X >= g_logx && mouse_x <= g_logx_e ? (
-   !(mouse_cap&1)? (
-     // Log-off as the measurement stop point, added 8 Aug 2026: capture
-     // the elapsed-since-Clear value right as logging turns off, so
-     // Duration (see export_log()) can reflect "first note to Log OFF"
-     // instead of "first note to whenever Export happened to be
-     // clicked" -- a deliberate stop, not an accidental one.
-     log_active ? log_stop_elapsed = time_precise() - clear_time_origin;
-     log_active = !log_active;
-   );
+   !(mouse_cap&1)? log_active = !log_active;
    g_capst=1;
   ) :
   g_cap == 3 && mouse_y < top_margin && mouse_X >= g_clearx && mouse_x <= g_clearx_e ? (
     !(mouse_cap&1) ? (
        seq=hist_size=0;g_histsize=0;
        clear_time_origin = time_precise();
-       log_stop_elapsed = 0;
        g_pos=1; g_at_end=1;
        g_scrollbar_top = top_margin+1 + g_pos * (gfx_h-top_margin-1) / g_histsize;
        g_scrollbar_bot = top_margin+1 + (g_pos + g_viewsize)*(gfx_h-top_margin-1)/g_histsize;    );
