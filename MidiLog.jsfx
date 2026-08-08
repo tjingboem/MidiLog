@@ -160,7 +160,14 @@ ent_midiinfo2 = 3;
 ent_sysex_cnt = 4;
 ent_seq=5;
 ent_bus = 6;
-ent_size = 7;
+// Elapsed-seconds-since-Clear, added 8 Aug 2026: TimePos (ent_time) is
+// REAPER's own play_position, which only moves while the transport is
+// actually rolling -- useless as a time axis for live-input testing
+// (holding keys, no Play pressed). time_precise() is real wall-clock
+// time regardless of transport state, so this gives every entry a
+// timestamp relative to the last Clear that's always meaningful.
+ent_elapsed = 7;
+ent_size = 8;
 
 // .... DarkStar (casrya NOTE: C = -1 gives middle C is C4)
 FIRST_C = -1; //-2 for C-2 to G8, -1 for C-1 to G9 or 0 for C0 to G10
@@ -185,6 +192,12 @@ hist = midi_buf + max_midi_buf_len;
 hist_size = 0;
 hist_max = 10000*ent_size;
 hist_chunk = 1000*ent_size; // advance
+
+// Clear-relative time origin, added 8 Aug 2026 -- see ent_elapsed above.
+// Set here too (not just on Clear) so a freshly loaded instance has a
+// sane origin from the start, before the user ever clicks Clear.
+clear_time_origin = time_precise();
+log_stop_elapsed = 0; // see the Log-button handler, and export_log()
 // casrya: uncomment to test history trimming with small history
 //hist_max = 10*ent_size;
 //hist_chunk = ent_size; // advance
@@ -208,7 +221,7 @@ filter_hide_mpe   = 0;
 // flagged as an exact repeat at capture time. Sentinel -1 so the very
 // first message on any channel always counts as a change. Placed at a
 // high address, well clear of hist's range (hist tops out well under
-// 100000 given hist_max = 10000*ent_size and ent_size = 7).
+// 100000 given hist_max = 10000*ent_size and ent_size = 8).
 mpe_last_pb   = 500000; // 16 slots, pitch bend
 mpe_last_cc74 = 500020; // 16 slots
 mpe_last_cp   = 500040; // 16 slots
@@ -237,6 +250,7 @@ function set_history_common()
   hist[hist_size+ent_blockoffs] = ts;
   hist[hist_size+ent_seq] = seq; seq+=1;
   hist[hist_size+ent_bus] = midi_bus;
+  hist[hist_size+ent_elapsed] = time_precise() - clear_time_origin;
   hist_size+=ent_size;
   g_force_redraw=1;
 );
@@ -443,20 +457,34 @@ local(n, k)
 );
 
 function export_log()
-local(ptr, endptr, msg, dnum1, dnum2, tnum1, pb_value, sysex_cnt, si, val, gpos)
+local(ptr, endptr, msg, dnum1, dnum2, tnum1, pb_value, sysex_cnt, si, val, gpos,
+      first_elapsed, duration_end)
 (
   // gmem[0] = generation counter, gmem[1] = final length -- both written
   // last, once the whole export is done, so the watcher never reads a
   // partially-written buffer. Row text starts at gmem[2].
   gpos = 2;
-  gpos = gmem_write_str(gpos, "Seq\tTimePos\tBus\tChan\tType\tIdent\tValue\n");
+  // Zero-basing, added 8 Aug 2026: raw ent_elapsed is relative to the
+  // last Clear, but there's usually a gap between clicking Clear and the
+  // first actual note (2+ seconds in real use). Subtracting the first
+  // captured event's own elapsed value re-bases everything to "since the
+  // first note," which is what's actually meaningful to read.
+  first_elapsed = hist_size > 0 ? hist[ent_elapsed] : 0;
+  // Duration line: elapsed time from the first note to when logging was
+  // deliberately stopped (Log button clicked off), or to now if logging
+  // is still active -- not to whenever Export happened to be clicked,
+  // which could be long after playing stopped.
+  duration_end = log_active ? (time_precise() - clear_time_origin) : log_stop_elapsed;
+  sprintf(#exp_line, "Duration: %.3f seconds\n\n", duration_end - first_elapsed);
+  gpos = gmem_write_str(gpos, #exp_line);
+  gpos = gmem_write_str(gpos, "Seq\tTimePos\tElapsed\tBus\tChan\tType\tIdent\tValue\n");
 
   ptr = hist;
   endptr = hist + hist_size;
   while (ptr < endptr) (
     tnum1 = ptr[ent_time] + ptr[ent_blockoffs]/srate;
-    sprintf(#exp_line, "%d\t%.3f\t%d\t%d\t",
-      ptr[ent_seq], tnum1, ptr[ent_bus]+1, (ptr[ent_midiinfo]&15)+1);
+    sprintf(#exp_line, "%d\t%.3f\t%.3f\t%d\t%d\t",
+      ptr[ent_seq], tnum1, ptr[ent_elapsed] - first_elapsed, ptr[ent_bus]+1, (ptr[ent_midiinfo]&15)+1);
     gpos = gmem_write_str(gpos, #exp_line);
 
     ptr[ent_sysex_cnt] > 0 ? (
@@ -632,12 +660,22 @@ g_cap ? (
     g_scrollbar_bot = top_margin+1 + (g_pos + g_viewsize)*(gfx_h-top_margin-1)/g_histsize;
   ) :
   g_cap == 4 && mouse_y < top_margin && mouse_X >= g_logx && mouse_x <= g_logx_e ? (
-   !(mouse_cap&1)? log_active=!log_active;
+   !(mouse_cap&1)? (
+     // Log-off as the measurement stop point, added 8 Aug 2026: capture
+     // the elapsed-since-Clear value right as logging turns off, so
+     // Duration (see export_log()) can reflect "first note to Log OFF"
+     // instead of "first note to whenever Export happened to be
+     // clicked" -- a deliberate stop, not an accidental one.
+     log_active ? log_stop_elapsed = time_precise() - clear_time_origin;
+     log_active = !log_active;
+   );
    g_capst=1;
   ) :
   g_cap == 3 && mouse_y < top_margin && mouse_X >= g_clearx && mouse_x <= g_clearx_e ? (
     !(mouse_cap&1) ? (
        seq=hist_size=0;g_histsize=0;
+       clear_time_origin = time_precise();
+       log_stop_elapsed = 0;
        g_pos=1; g_at_end=1;
        g_scrollbar_top = top_margin+1 + g_pos * (gfx_h-top_margin-1) / g_histsize;
        g_scrollbar_bot = top_margin+1 + (g_pos + g_viewsize)*(gfx_h-top_margin-1)/g_histsize;    );
@@ -745,7 +783,13 @@ gfx_w != g_lw || gfx_h != g_lh ||  g_force_redraw ? (
 
   gfx_r=0.8; gfx_g=0.8; gfx_b=0.85;
   g_clearx = gfx_x;
-  gfx_printf("Clear");
+  // Renamed from "Clear" to "Clear&Ready", 8 Aug 2026: this button now
+  // also resets the elapsed-time origin (see clear_time_origin), so the
+  // label should say what it means to the user -- everything's wiped and
+  // the measurement window is about to begin, even though internally the
+  // clock itself starts ticking right at this click, not at the first
+  // note (export_log() re-bases to the first note afterward).
+  gfx_printf("Clear&Ready");
   g_clearx_e = gfx_x;
 
   gfx_x += gfx_texth * 2; // casrya: add scaling
