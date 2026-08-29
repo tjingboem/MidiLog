@@ -63,10 +63,66 @@ end
 -- comment for the three earlier attempts this replaced and why).
 -- ======================================================================
 
-local DIAGRAM_WIDTH = 100 -- columns; keeps a diagram readable regardless
-                           -- of how long the actual recording was -- the
-                           -- one thing tjingboem specifically asked to
-                           -- keep bounded.
+-- Diagram width, made adaptive 29 Aug 2026. It was a flat 100 columns --
+-- bounded on purpose, so a long recording could never produce an
+-- unreadably wide file. The bound held, but on any dense capture it put
+-- several notes into a single column, and the keyboard diagram has no
+-- way to show that: bars are drawn in onset order straight into a shared
+-- row, and "[" goes down at the onset column unconditionally, so each
+-- new note's opening bracket lands on the previous note's channel digit.
+-- A busy row collapsed into a run of "[" with only the occasional digit
+-- surviving in a gap. (Measured on a 232-note, 6.8 s capture: 110 writes
+-- into already-drawn cells on one pitch row, 45 brackets left against 19
+-- digits.) See "When the row fills up with [" in CLAUDE.md.
+--
+-- Widening the grid is the direct fix -- give a note enough columns and
+-- its own brackets and digits have somewhere to live -- so the width is
+-- now chosen per export from the capture's own duration, targeting
+-- DIAGRAM_TARGET_MS per column. Rounded to a multiple of 10 to keep the
+-- time ruler's every-10-columns marks evenly spaced, and still clamped
+-- at both ends: the upper bound is what keeps tjingboem's original
+-- "never unreadably wide" guarantee.
+--
+-- 25 ms/column was chosen against that same capture, where the median
+-- gap between successive onsets on one pitch was 85 ms and the median
+-- note lasted 149 ms -- roughly 6 columns of note against 3 of gap,
+-- which reads cleanly as "[nnnn] [nnnn]". A capture long enough to hit
+-- DIAGRAM_MAX_WIDTH goes back to degrading the same way; that is what
+-- Clear is for.
+local DIAGRAM_MIN_WIDTH = 100
+local DIAGRAM_MAX_WIDTH = 400
+local DIAGRAM_TARGET_MS = 25
+
+-- Widening the grid fixed the collisions and immediately created the
+-- opposite problem: at 270 columns a diagram line is 275 characters, so
+-- it soft-wraps in any normal editor window. That is worse than the
+-- collisions were. Every pitch row is the same length, so they all wrap
+-- at the same point and the halves interleave -- row B1's tail printing
+-- between row A#1's head and tail -- which destroys the vertical
+-- alignment the whole diagram exists for.
+--
+-- So the timeline is cut into panels of at most PANEL_WIDTH columns,
+-- stacked down the page like systems on a musical score, each one a
+-- complete keyboard followed by the value lanes for that same span of
+-- time (tjingboem's design, 29 Aug 2026). Resolution and window width
+-- stop competing: pick ms-per-column for legibility, and let the number
+-- of panels absorb the length. 100 columns matches the width that read
+-- comfortably before any of this, and keeps a line inside 105
+-- characters.
+--
+-- Raised to 200 on 29 Aug 2026 (tjingboem). Note this is a *maximum*,
+-- not the width panels actually get: panel_bounds() divides the grid
+-- into equal panels no wider than this, so a 270-column grid becomes
+-- two panels of 135 (a 140-character line), not one of 200 plus a stub.
+local PANEL_WIDTH = 200
+local DIAGRAM_WIDTH = DIAGRAM_MIN_WIDTH -- set per export in build_diagrams()
+
+local function choose_diagram_width(duration)
+  local w = math.floor((duration * 1000 / DIAGRAM_TARGET_MS) / 10 + 0.5) * 10
+  if w < DIAGRAM_MIN_WIDTH then w = DIAGRAM_MIN_WIDTH end
+  if w > DIAGRAM_MAX_WIDTH then w = DIAGRAM_MAX_WIDTH end
+  return w
+end
 
 -- Every diagram's grid starts after this same left margin (matches the
 -- keyboard diagram's own "%-4s " note-name label width), added 8 Aug
@@ -107,7 +163,7 @@ local BLACK_KEY_BG = "-"
 -- the pitch range actually captured rather than the full 0-127 note
 -- range. tjingboem's own framing: "the real numbers show the exact
 -- numbers, the diagrams show evolution" -- so the auto-scaled range
--- itself still isn't shown in the label (see build_value_diagram), same
+-- itself still isn't shown in the label (see build_value_chart), same
 -- as before.
 local AREA_ROWS = 8
 
@@ -200,11 +256,17 @@ local function collect_value_groups(rows)
           elseif r.ident ~= "" then
             label = label .. " " .. r.ident
           end
+          -- Kept separately from the channel suffix so a group that never
+          -- moves can be collapsed with its siblings into one line
+          -- (29 Aug 2026) -- "CC 74 (Ch 1-8) = 64" instead of eight
+          -- identical empty charts.
+          local stem = label
           label = label .. " (Ch " .. r.chan .. ")"
           -- lo/hi start at the extremes and narrow to this group's own
           -- actual min/max as points come in (see the auto-scaling note
           -- near AREA_ROWS above) -- not a fixed MIDI range.
-          value_groups[key] = { label = label, lo = math.huge, hi = -math.huge, points = {} }
+          value_groups[key] = { label = label, stem = stem, chan = r.chan,
+                               lo = math.huge, hi = -math.huge, points = {} }
           group_order[#group_order + 1] = key
         end
         local v = tonumber(r.value)
@@ -289,7 +351,7 @@ end
 -- queue per (channel, pitch), adequate since real note pairing is
 -- normally well-nested. A note still sounding at export time (no
 -- matching off found) gets end_elapsed = nil, drawn out to the right
--- edge of the diagram by build_keyboard_diagram below. Notes whose name
+-- edge of the diagram by build_keyboard_rows below. Notes whose name
 -- doesn't parse (shouldn't happen given MidiLog.jsfx's own fixed naming,
 -- but checked rather than assumed) are silently skipped.
 local function pair_notes_all(rows)
@@ -301,7 +363,10 @@ local function pair_notes_all(rows)
       if r.mtype == "Note On" then
         local midi = note_name_to_midi(r.ident)
         if midi then
-          local bar = { chan = r.chan, midi = midi, start_elapsed = r.elapsed, end_elapsed = nil }
+          -- vel is carried for the HTML view's tooltip; the ASCII
+          -- diagrams have no room for it.
+          local bar = { chan = r.chan, midi = midi, vel = r.value,
+                        start_elapsed = r.elapsed, end_elapsed = nil }
           bars[#bars + 1] = bar
           open[key] = open[key] or {}
           table.insert(open[key], bar)
@@ -327,19 +392,49 @@ end
 -- A row of time labels (seconds since the first note, matching every
 -- other number in this export) spaced every 10 columns, shared by every
 -- diagram so they all read against the same ruler.
-local function build_time_ruler(duration)
-  local ruler = {}
-  for c = 1, DIAGRAM_WIDTH do ruler[c] = " " end
-  local c = 1
+-- Column bounds of each panel. Panels are made equal width rather than
+-- "full ones then a short remainder", so every panel covers the same
+-- span of time and they can be compared against each other by eye.
+local function panel_bounds()
+  local n = math.ceil(DIAGRAM_WIDTH / PANEL_WIDTH)
+  if n < 1 then n = 1 end
+  local per = math.ceil(DIAGRAM_WIDTH / n)
+  local bounds, c = {}, 1
   while c <= DIAGRAM_WIDTH do
-    local t = (c - 1) / (DIAGRAM_WIDTH - 1) * duration
-    local label = string.format("%.1f", t)
+    local e = c + per - 1
+    if e > DIAGRAM_WIDTH then e = DIAGRAM_WIDTH end
+    bounds[#bounds + 1] = { c, e }
+    c = e + 1
+  end
+  return bounds
+end
+
+local function col_to_time(c, duration)
+  return (c - 1) / (DIAGRAM_WIDTH - 1) * duration
+end
+
+-- A row of time labels for one panel's column range. Times are absolute
+-- (seconds since the first message), so panel 2 picks up reading where
+-- panel 1 left off rather than restarting at zero.
+local function build_time_ruler(duration, c0, c1)
+  local w = c1 - c0 + 1
+  local ruler = {}
+  for i = 1, w do ruler[i] = " " end
+
+  -- Aim for ~10 labels across the panel, rounded to a multiple of 10 so
+  -- the marks sit on tidy column boundaries. Every 10 columns was right
+  -- when the grid was a fixed 100 wide; at any other width it is noise.
+  local step = math.floor(w / 100 + 0.5) * 10
+  if step < 10 then step = 10 end
+
+  local c = c0
+  while c <= c1 do
+    local label = string.format("%.1f", col_to_time(c, duration))
     for i = 1, #label do
-      if c + i - 1 <= DIAGRAM_WIDTH then
-        ruler[c + i - 1] = label:sub(i, i)
-      end
+      local idx = c - c0 + i
+      if idx <= w then ruler[idx] = label:sub(i, i) end
     end
-    c = c + 10
+    c = c + step
   end
   return table.concat(ruler)
 end
@@ -399,7 +494,7 @@ end
 -- bracket kept, close bracket dropped), 3+ columns shows both brackets
 -- with the channel's own fill pattern -- via fill_channel_span above --
 -- in whatever's left between them.
-local function build_keyboard_diagram(bars, duration)
+local function build_keyboard_rows(bars, duration)
   if #bars == 0 then return nil end
 
   local min_midi, max_midi = math.huge, -math.huge
@@ -437,22 +532,15 @@ local function build_keyboard_diagram(bars, duration)
     end
   end
 
-  -- No header line here (removed 8 Aug 2026, tjingboem's request) -- the
-  -- first row starts immediately, so this diagram's own "0.0" ruler mark
-  -- lands on the very first line after the "Diagrams" separator, which
-  -- is also the shared left-margin every other diagram aligns against
-  -- (see LABEL_MARGIN below).
-  local lines = {}
+  -- Returns full-width rows rather than finished text: the renderer
+  -- slices them into panels, and it can only do that while the cells are
+  -- still addressable by column. The "%-4s " note label is 5 characters,
+  -- matching LABEL_MARGIN, so every row lines up with every value lane.
+  local rows = {}
   for midi = max_midi, min_midi, -1 do
-    lines[#lines + 1] = string.format("%-4s ", midi_to_note_name(midi)) .. table.concat(row_cells[midi])
+    rows[#rows + 1] = { name = midi_to_note_name(midi), cells = row_cells[midi] }
   end
-  -- "seconds" appended right after the ruler, 8 Aug 2026 (tjingboem's
-  -- request): lands in the same column every value diagram's hi/lo
-  -- label starts in (both are LABEL_MARGIN + DIAGRAM_WIDTH columns in),
-  -- so the ruler's unit reads clearly without needing its own separate
-  -- label line.
-  lines[#lines + 1] = LABEL_MARGIN .. build_time_ruler(duration) .. "seconds"
-  return table.concat(lines, "\n")
+  return rows
 end
 
 -- 8-row area chart, replacing the old single-row sparkline 8 Aug 2026
@@ -469,7 +557,7 @@ end
 -- constant's own comment) -- heights[] is computed in half-row units
 -- (0..AREA_ROWS*2) instead of whole rows, so a fine movement that would
 -- round to the same whole row still shows up as a half-step.
-local function build_value_diagram(group, duration)
+local function build_value_chart(group, duration)
   local pts = group.points
   if #pts == 0 then return nil end
   local range = group.hi - group.lo
@@ -505,7 +593,7 @@ local function build_value_diagram(group, duration)
   -- extremes were always implicit. group.hi labels the top row, group.lo
   -- the bottom, so the two numbers that matter most for reading the
   -- shape are right there without cross-referencing the raw log rows.
-  local lines = {}
+  local rows = {}
   for r = 1, AREA_ROWS do
     local row = {}
     local row_from_bottom = AREA_ROWS - r + 1
@@ -516,23 +604,187 @@ local function build_value_diagram(group, duration)
         or (heights[c] >= half_threshold) and AREA_FILL_HALF
         or " "
     end
-    local line = LABEL_MARGIN .. table.concat(row)
-    -- "--" instead of a plain space before the number, 8 Aug 2026
-    -- (tjingboem's request): reads as a leader/tick mark pointing from
-    -- the row into its value, making it visually clear the number is
-    -- the level at that row -- not just trailing text.
-    if r == 1 then
-      line = line .. "--" .. string.format("%d", group.hi)
-    elseif r == AREA_ROWS then
-      line = line .. "--" .. string.format("%d", group.lo)
-    end
-    lines[#lines + 1] = line
+    rows[#rows + 1] = row
   end
-  -- "seconds" appended right after the ruler, same column the hi/lo
-  -- labels above start in -- see the identical note in
-  -- build_keyboard_diagram.
-  lines[#lines + 1] = LABEL_MARGIN .. build_time_ruler(duration) .. "seconds"
-  lines[#lines + 1] = group.label
+
+  -- heights is carried alongside the rendered rows so render_panels can
+  -- ask whether this stream actually moved inside a given panel without
+  -- re-deriving it from the glyphs.
+  return { label = group.label, hi = group.hi, lo = group.lo,
+           rows = rows, heights = heights }
+end
+
+-- Assembles the panels. Each one is the presentation that worked before
+-- any of this -- a keyboard diagram, its ruler, then one lane per moving
+-- value stream, each with its own ruler and label -- covering one slice
+-- of the timeline. The series then continues from where the previous
+-- panel stopped (tjingboem, 29 Aug 2026: "the old presentation was
+-- okay, just produce a series of these diagrams").
+--
+-- Keeping the value lanes inside their own panel, rather than gathering
+-- them all at the end, is the point: a note in the keyboard diagram and
+-- the expression that shaped it are then in the same column of the same
+-- block, close enough to read together.
+--
+-- Every pitch row is drawn in every panel, including pitches silent in
+-- that slice, for the same reason the diagram never skipped empty
+-- semitones: the keyboard has to stay the same shape from panel to
+-- panel or they cannot be compared by eye.
+-- Did this stream actually move within one panel's columns? A stream
+-- that is flat here contributes a straight line and nothing else, and
+-- with a real MPE capture -- pitch bend, CC74 and pressure on every
+-- channel -- drawing all of them in every panel would run to hundreds
+-- of lines of mostly nothing. So a lane appears in a panel only where
+-- something happened in it (29 Aug 2026). Globally-constant streams are
+-- already handled separately, by build_constant_block.
+local function chart_moves_in(ch, c0, c1)
+  local first = ch.heights[c0]
+  for c = c0 + 1, c1 do
+    if ch.heights[c] ~= first then return true end
+  end
+  return false
+end
+
+local function render_panels(kb_rows, charts, duration)
+  local bounds = panel_bounds()
+  local blocks = {}
+
+  for pi, b in ipairs(bounds) do
+    local c0, c1 = b[1], b[2]
+    local lines = {}
+
+    if #bounds > 1 then
+      lines[#lines + 1] = string.format("%s-- %.1f - %.1f s   (panel %d of %d) --",
+        LABEL_MARGIN, col_to_time(c0, duration), col_to_time(c1, duration), pi, #bounds)
+      lines[#lines + 1] = ""
+    end
+
+    if kb_rows then
+      for _, r in ipairs(kb_rows) do
+        lines[#lines + 1] = string.format("%-4s ", r.name) .. table.concat(r.cells, "", c0, c1)
+      end
+      lines[#lines + 1] = LABEL_MARGIN .. build_time_ruler(duration, c0, c1) .. "seconds"
+    end
+
+    for _, ch in ipairs(charts) do
+      if chart_moves_in(ch, c0, c1) then
+        lines[#lines + 1] = ""
+        for ri, row in ipairs(ch.rows) do
+          local line = LABEL_MARGIN .. table.concat(row, "", c0, c1)
+          if ri == 1 then
+            line = line .. "--" .. string.format("%d", ch.hi)
+          elseif ri == #ch.rows then
+            line = line .. "--" .. string.format("%d", ch.lo)
+          end
+          lines[#lines + 1] = line
+        end
+        lines[#lines + 1] = LABEL_MARGIN .. build_time_ruler(duration, c0, c1) .. "seconds"
+        lines[#lines + 1] = ch.label
+      end
+    end
+
+    blocks[#blocks + 1] = table.concat(lines, "\n")
+  end
+
+  return blocks
+end
+
+-- A value stream that never moved has nothing to plot: eight blank rows
+-- and two identical hi/lo labels, repeated once per channel. A real
+-- capture produced 24 of them in a row -- roughly 260 lines of nothing
+-- between the reader and the one diagram that mattered. So a flat group
+-- is reported as a single line instead of a chart, and flat groups that
+-- share a stem and a value are collapsed across channels: "CC 74
+-- (Ch 1-8) = 64" rather than eight separate lines. The information is
+-- preserved -- that the stream was present, and what it sat at -- which
+-- is why these are summarised rather than dropped. (29 Aug 2026)
+local function collapse_channels(chans)
+  table.sort(chans, function(a, b) return (tonumber(a) or 0) < (tonumber(b) or 0) end)
+  local parts, i = {}, 1
+  while i <= #chans do
+    local j = i
+    while j < #chans and (tonumber(chans[j + 1]) or 0) == (tonumber(chans[j]) or 0) + 1 do
+      j = j + 1
+    end
+    if j > i + 1 then
+      parts[#parts + 1] = chans[i] .. "-" .. chans[j]
+    elseif j == i + 1 then
+      parts[#parts + 1] = chans[i] .. ", " .. chans[j]
+    else
+      parts[#parts + 1] = chans[i]
+    end
+    i = j + 1
+  end
+  return table.concat(parts, ", ")
+end
+
+local function build_constant_block(flat)
+  if #flat == 0 then return nil end
+
+  local seen, order = {}, {}
+  for _, g in ipairs(flat) do
+    local key = (g.stem or g.label) .. "|" .. tostring(g.lo)
+    if not seen[key] then
+      seen[key] = { stem = g.stem or g.label, value = g.lo, chans = {} }
+      order[#order + 1] = key
+    end
+    local c = seen[key].chans
+    c[#c + 1] = g.chan
+  end
+
+  local lines = { LABEL_MARGIN .. "Constant through this capture, so not plotted:" }
+  for _, key in ipairs(order) do
+    local e = seen[key]
+    lines[#lines + 1] = string.format("%s  %s (Ch %s) = %d",
+      LABEL_MARGIN, e.stem, collapse_channels(e.chans), e.value)
+  end
+  return table.concat(lines, "\n")
+end
+
+-- A legend printed with the diagrams themselves, 29 Aug 2026
+-- (tjingboem's request): the glyphs should be readable in the export
+-- without going to the manual for them, since the export is what
+-- actually gets read -- often somewhere the repo isn't. Only the lines
+-- that apply to this particular export are printed; a legend naming
+-- symbols that aren't on the page below it is noise. Indented by
+-- LABEL_MARGIN like every diagram, so it sits in the same left column
+-- as the data it describes. The grid line is worth printing now that
+-- the width is adaptive: ms-per-column is exactly what tells a reader
+-- how much to trust a dense row.
+local function build_legend(bars, has_values, duration)
+  local wide_chan = false
+  for _, bar in ipairs(bars) do
+    local n = tonumber(bar.chan)
+    if n and n >= 10 then wide_chan = true end
+  end
+
+  local lines = {}
+  local function add(s) lines[#lines + 1] = LABEL_MARGIN .. s end
+
+  if #bars > 0 then
+    add("Notes   [ note onset    ] note release    1-9 channel fill")
+    if wide_chan then
+      add("        /N channels 10-16 (/0 = ch 10, /3 = ch 13, /6 = ch 16)")
+    end
+    add("        [8] is one note, [8][8] two;  a 2-column note keeps only \"[8\",")
+    add("        a 1-column note only \"8\".  \"-\" is a black-key row.")
+  end
+
+  if has_values then
+    add("Values  : value reaches this row    . half-reaches it")
+    add("        --N at top and bottom right is this diagram's own hi / lo")
+  end
+
+  add(string.format(
+    "Grid    %d columns, %.1f ms each;  ruler = seconds since the first message",
+    DIAGRAM_WIDTH, duration * 1000 / (DIAGRAM_WIDTH - 1)))
+
+  local panels = #panel_bounds()
+  if panels > 1 then
+    add(string.format(
+      "        the timeline runs across %d panels down the page, in order", panels))
+  end
+
   return table.concat(lines, "\n")
 end
 
@@ -541,32 +793,311 @@ end
 -- it. Returns "" (nothing appended) if there's no Duration line (an
 -- export from before this feature existed, or something malformed) or
 -- no rows at all -- an empty capture has nothing to plot.
+-- ======================================================================
+-- HTML + inline SVG view, 29 Aug 2026.
+--
+-- The ASCII diagrams above are bounded by the shape of a text file:
+-- fixed-width cells, one glyph per column, panels to stop lines wrapping.
+-- Every legibility problem this file has solved -- collisions, bracket
+-- widths, "/N" units, the panel split -- exists only because of that.
+-- A drawing has none of those limits, so this view is written alongside
+-- (never instead of) the .txt: the text stays greppable and pasteable,
+-- the page is for looking at.
+--
+-- Emitted as .html with the SVG inlined rather than a bare .svg on
+-- purpose. On a normal Linux desktop image/svg+xml is associated with an
+-- image viewer, not a browser -- it would render, but a viewer does not
+-- run SVG's interactive layer, so tooltips and channel toggles would be
+-- dead. text/html always opens a browser. It also stays one
+-- self-contained file with no assets beside it.
+--
+-- Colour carries channel identity here, which is what the digit and "/N"
+-- glyphs were straining to do in ASCII, and one SVG holds the roll and
+-- every value lane stacked -- so they share an x axis structurally and
+-- scroll together with no code to keep them in sync.
+
+local HTML_PX_PER_SEC = 140   -- horizontal zoom; the page scrolls
+local HTML_ROW_H      = 12    -- height of one semitone row
+local HTML_RULER_H    = 22
+local HTML_LANE_H     = 64    -- height of one value lane
+local HTML_LANE_GAP   = 30    -- room for the lane's label above it
+local HTML_NOTE_GAP   = 1.5   -- px given back by each note so neighbours separate
+local HTML_GUTTER_W   = 52    -- fixed left column of row labels
+local HTML_AUTO_OPEN  = false -- open the page when an export finishes
+
+local CHAN_COLOUR = {
+  "#1f77b4", "#ff7f0e", "#2ca02c", "#d62728", "#9467bd", "#8c564b",
+  "#e377c2", "#17becf", "#bcbd22", "#7f7f7f", "#393b79", "#637939",
+  "#8c6d31", "#843c39", "#7b4173", "#3182bd",
+}
+
+local function chan_colour(chan)
+  local n = tonumber(chan) or 1
+  return CHAN_COLOUR[((n - 1) % 16) + 1]
+end
+
+local function esc(str)
+  return (tostring(str):gsub("&", "&amp;"):gsub("<", "&lt;"):gsub(">", "&gt;"))
+end
+
+local function build_html(bars, groups, duration)
+  local min_midi, max_midi = math.huge, -math.huge
+  for _, bar in ipairs(bars) do
+    if bar.midi < min_midi then min_midi = bar.midi end
+    if bar.midi > max_midi then max_midi = bar.midi end
+  end
+  if min_midi > max_midi then min_midi, max_midi = 60, 72 end
+
+  local moving, flat = {}, {}
+  for _, g in ipairs(groups) do
+    if #g.points > 0 then
+      if g.hi == g.lo then flat[#flat + 1] = g else moving[#moving + 1] = g end
+    end
+  end
+
+  local roll_h = (max_midi - min_midi + 1) * HTML_ROW_H
+  local total_h = HTML_RULER_H + roll_h
+  for _ = 1, #moving do total_h = total_h + HTML_LANE_GAP + HTML_LANE_H end
+  local width = math.floor(duration * HTML_PX_PER_SEC) + 2
+
+  local function x_of(t) return t * HTML_PX_PER_SEC end
+  local function y_of(midi) return HTML_RULER_H + (max_midi - midi) * HTML_ROW_H end
+
+  local o = {}
+  local function w(...) o[#o + 1] = table.concat({ ... }) end
+
+  w('<!doctype html>\n<html lang="en"><head><meta charset="utf-8">')
+  w('<title>MidiLog</title>\n<style>\n',
+    'body{margin:0;font:13px/1.4 system-ui,sans-serif;background:#fbfbfc;color:#222}\n',
+    'header{padding:10px 14px;border-bottom:1px solid #ddd;background:#fff}\n',
+    'h1{margin:0 0 6px;font-size:15px;font-weight:600}\n',
+    '.meta{color:#666;font-size:12px}\n',
+    '#legend{display:flex;flex-wrap:wrap;gap:4px 10px;margin-top:8px}\n',
+    '#legend label{display:flex;align-items:center;gap:4px;cursor:pointer;',
+    'font-variant-numeric:tabular-nums}\n',
+    '#legend .sw{width:11px;height:11px;border-radius:2px;display:inline-block}\n',
+    '#pane{display:flex;align-items:flex-start}\n',
+    '#gutter{flex:0 0 auto;background:#fff;border-right:1px solid #ddd}\n',
+    '#track{overflow-x:auto;flex:1 1 auto}\n',
+    'text{font:10px system-ui,sans-serif;fill:#555}\n',
+    '.note .body{stroke:rgba(0,0,0,.3);stroke-width:.5}\n',
+    '.note:hover .body{stroke:#000;stroke-width:1.2}\n',
+    '.note{cursor:default}\n',
+    'footer{padding:10px 14px;color:#666;border-top:1px solid #ddd;background:#fff}\n',
+    'footer code{background:#f0f0f2;padding:1px 4px;border-radius:3px}\n')
+  for c = 1, 16 do
+    w('body.h', c, ' .c', c, '{display:none}\n')
+  end
+  w('</style></head><body>\n')
+
+  w('<header><h1>MidiLog</h1><div class="meta">',
+    string.format("%.3f s &middot; %d notes", duration, #bars),
+    ' &middot; hover a note for its channel, velocity and timing',
+    '</div><div id="legend">')
+  local seen_chan = {}
+  for _, bar in ipairs(bars) do seen_chan[tonumber(bar.chan) or 1] = true end
+  for c = 1, 16 do
+    if seen_chan[c] then
+      w('<label><input type="checkbox" checked data-ch="', c, '">',
+        '<span class="sw" style="background:', chan_colour(c), '"></span>Ch ', c, '</label>')
+    end
+  end
+  w('</div></header>\n<div id="pane">')
+
+  -- fixed label column: same height and row pitch as the track beside it
+  w('<div id="gutter"><svg width="', HTML_GUTTER_W, '" height="', total_h, '">')
+  for midi = min_midi, max_midi do
+    local y = y_of(midi)
+    if is_black_key(midi) then
+      w('<rect x="0" y="', y, '" width="', HTML_GUTTER_W, '" height="', HTML_ROW_H,
+        '" fill="#f2f2f4"/>')
+    end
+    w('<text x="', HTML_GUTTER_W - 5, '" y="', y + HTML_ROW_H - 3, '" text-anchor="end">',
+      esc(midi_to_note_name(midi)), '</text>')
+  end
+  local lane_y = HTML_RULER_H + roll_h
+  for _, g in ipairs(moving) do
+    w('<text x="4" y="', lane_y + HTML_LANE_GAP - 8, '">', esc(g.label), '</text>')
+    w('<text x="', HTML_GUTTER_W - 5, '" y="', lane_y + HTML_LANE_GAP + 9,
+      '" text-anchor="end">', string.format("%d", g.hi), '</text>')
+    w('<text x="', HTML_GUTTER_W - 5, '" y="', lane_y + HTML_LANE_GAP + HTML_LANE_H,
+      '" text-anchor="end">', string.format("%d", g.lo), '</text>')
+    lane_y = lane_y + HTML_LANE_GAP + HTML_LANE_H
+  end
+  w('</svg></div>')
+
+  w('<div id="track"><svg width="', width, '" height="', total_h, '">')
+
+  -- black-key row shading, matching the ASCII diagram's own convention
+  for midi = min_midi, max_midi do
+    if is_black_key(midi) then
+      w('<rect x="0" y="', y_of(midi), '" width="', width, '" height="', HTML_ROW_H,
+        '" fill="#f2f2f4"/>')
+    end
+  end
+
+  -- one-second gridlines, labelled along the top
+  local sec = 0
+  while sec <= duration do
+    local x = string.format("%.1f", x_of(sec))
+    w('<line x1="', x, '" y1="', HTML_RULER_H - 6, '" x2="', x, '" y2="', total_h,
+      '" stroke="#e2e2e6"/>')
+    w('<text x="', string.format("%.1f", x_of(sec) + 3), '" y="', HTML_RULER_H - 8,
+      '">', string.format("%.0fs", sec), '</text>')
+    sec = sec + 1
+  end
+
+  -- Consecutive notes on one pitch and channel are the same colour, so
+  -- with the bars simply butting together five notes read as one long
+  -- one -- exactly what the "[" and "]" brackets exist to prevent in the
+  -- ASCII diagram (tjingboem spotted it in the first real page, 29 Aug
+  -- 2026). Two things fix it, and both are needed:
+  --
+  --   * a gap: each bar gives back a sliver of its width, so there is
+  --     always background visible between one note and the next;
+  --   * an onset marker: a darker tick down the left edge of every note,
+  --     the direct equivalent of "[". The gap alone is ambiguous -- it
+  --     could be a real rest -- whereas a tick states "a note begins
+  --     here", and it stays true for a retrigger that overlaps its own
+  --     predecessor, where there is no gap to see.
+  --
+  -- Black at low opacity rather than a darkened channel colour: it reads
+  -- as an attack marker against all 16 hues without a second palette.
+  for _, bar in ipairs(bars) do
+    local x0 = x_of(bar.start_elapsed)
+    local x1 = x_of(bar.end_elapsed or duration)
+    local bw = x1 - x0 - HTML_NOTE_GAP
+    if bw < 1.5 then bw = 1.5 end
+    local tick = bw * 0.4
+    if tick > 2 then tick = 2 elseif tick < 0.75 then tick = 0.75 end
+    local ch = tonumber(bar.chan) or 1
+    local y = y_of(bar.midi) + 1
+    local h = HTML_ROW_H - 2
+
+    w('<g class="note c', ch, '">',
+      '<title>', esc(midi_to_note_name(bar.midi)), '  Ch ', ch,
+      string.format("  vel %s  %.3f s", tostring(bar.vel or "?"), bar.start_elapsed),
+      bar.end_elapsed and string.format("  (%.0f ms)",
+        (bar.end_elapsed - bar.start_elapsed) * 1000) or "  (still sounding)",
+      '</title>',
+      '<rect class="body" x="', string.format("%.2f", x0),
+      '" y="', y, '" width="', string.format("%.2f", bw),
+      '" height="', h, '" rx="1.5" fill="', chan_colour(ch), '"/>',
+      '<rect class="onset" x="', string.format("%.2f", x0),
+      '" y="', y, '" width="', string.format("%.2f", tick),
+      '" height="', h, '" fill="#000" opacity="0.5"/>',
+      '</g>')
+  end
+
+  -- value lanes, stacked under the roll inside the same svg so they share
+  -- the x axis by construction and scroll with it
+  lane_y = HTML_RULER_H + roll_h
+  for _, g in ipairs(moving) do
+    local top = lane_y + HTML_LANE_GAP
+    local range = g.hi - g.lo
+    if range == 0 then range = 1 end
+    w('<rect x="0" y="', top, '" width="', width, '" height="', HTML_LANE_H,
+      '" fill="#fff" stroke="#e2e2e6"/>')
+    local pts, prev_y = {}, nil
+    for _, pt in ipairs(g.points) do
+      local px = x_of(pt.elapsed)
+      local py = top + HTML_LANE_H - ((pt.value - g.lo) / range) * HTML_LANE_H
+      if prev_y then pts[#pts + 1] = string.format("%.2f,%.2f", px, prev_y) end
+      pts[#pts + 1] = string.format("%.2f,%.2f", px, py)
+      prev_y = py
+    end
+    if prev_y then pts[#pts + 1] = string.format("%.2f,%.2f", width, prev_y) end
+    w('<polyline points="', table.concat(pts, " "),
+      '" fill="none" stroke="#444" stroke-width="1.2"/>')
+    lane_y = top + HTML_LANE_H
+  end
+
+  w('</svg></div></div>\n')
+
+  if #flat > 0 then
+    w('<footer>Constant through this capture, not plotted: ')
+    local bits = {}
+    for _, g in ipairs(flat) do
+      bits[#bits + 1] = "<code>" .. esc(g.label) .. " = "
+        .. string.format("%d", g.lo) .. "</code>"
+    end
+    w(table.concat(bits, ", "), '</footer>\n')
+  end
+
+  w('<script>\n',
+    'document.querySelectorAll("#legend input").forEach(function(b){\n',
+    '  b.addEventListener("change",function(){\n',
+    '    document.body.classList.toggle("h"+b.dataset.ch,!b.checked);\n',
+    '  });\n});\n</script>\n</body></html>\n')
+
+  return table.concat(o)
+end
+
+-- Same parse as build_diagrams, rendered as a page instead. Kept as its
+-- own entry point so the text export is unaffected if this ever fails.
+local function build_html_view(text)
+  local rows, duration = parse_export(text)
+  if not duration or duration <= 0 or #rows == 0 then return nil end
+
+  local value_groups, group_order = collect_value_groups(rows)
+  local groups = {}
+  for _, key in ipairs(group_order) do groups[#groups + 1] = value_groups[key] end
+
+  local bars = pair_notes_all(rows)
+  if #bars == 0 and #groups == 0 then return nil end
+
+  return build_html(bars, groups, duration)
+end
+
 local function build_diagrams(text)
   local rows, duration = parse_export(text)
   if not duration or duration <= 0 or #rows == 0 then
     return ""
   end
 
+  -- Set before anything is laid out: every builder below reads
+  -- DIAGRAM_WIDTH as an upvalue, so they all share this one width and
+  -- stay column-aligned with each other.
+  DIAGRAM_WIDTH = choose_diagram_width(duration)
+
   local value_groups, group_order = collect_value_groups(rows)
   local note_bars = pair_notes_all(rows)
+
+  -- Split before anything is drawn, so the legend below can describe
+  -- what the file will actually contain rather than what it might.
+  local moving, flat = {}, {}
+  for _, key in ipairs(group_order) do
+    local g = value_groups[key]
+    if #g.points > 0 then
+      if g.hi == g.lo then
+        flat[#flat + 1] = g
+      else
+        moving[#moving + 1] = g
+      end
+    end
+  end
+
+  local charts = {}
+  for _, g in ipairs(moving) do
+    local chart = build_value_chart(g, duration)
+    if chart then charts[#charts + 1] = chart end
+  end
+
+  local kb_rows = build_keyboard_rows(note_bars, duration)
 
   -- 3 blank lines of separation before the header, tjingboem's request --
   -- text (the raw log) already ends with its own trailing newline, so 3
   -- more newlines here is 3 full blank lines, not 4.
   local out = { string.rep("\n", 3) .. "--- Diagrams ---" }
 
-  -- Extra trailing "\n" here, 8 Aug 2026 (tjingboem's request): the join
-  -- below already puts one blank line between every pair of entries in
-  -- `out` -- this adds a second blank line specifically after the
-  -- keyboard diagram, setting it apart from the value diagrams that
-  -- follow.
-  local keyboard_diagram = build_keyboard_diagram(note_bars, duration)
-  if keyboard_diagram then out[#out + 1] = keyboard_diagram .. "\n" end
+  out[#out + 1] = build_legend(note_bars, #charts > 0, duration)
 
-  for _, key in ipairs(group_order) do
-    local diagram = build_value_diagram(value_groups[key], duration)
-    if diagram then out[#out + 1] = diagram end
+  for _, block in ipairs(render_panels(kb_rows, charts, duration)) do
+    out[#out + 1] = block
   end
+
+  local constant_block = build_constant_block(flat)
+  if constant_block then out[#out + 1] = constant_block end
 
   return table.concat(out, "\n\n") .. "\n"
 end
@@ -595,7 +1126,31 @@ local function watch()
         -- garbage for no benefit.
         f:write(text)
         f:close()
-        reaper.ShowMessageBox("Exported to:\n" .. fname, "MIDI Log Export", 0)
+
+        -- The page is written beside the .txt, never instead of it, and
+        -- a failure here must not cost the export that already
+        -- succeeded -- hence pcall and the silent skip.
+        local html_name = fname:gsub("%.txt$", ".html")
+        local ok, html = pcall(build_html_view, text)
+        if ok and html then
+          local hf = io.open(html_name, "w")
+          if hf then
+            hf:write(html)
+            hf:close()
+            -- CF_ShellExecute comes from SWS. Checked rather than
+            -- assumed, so a REAPER without it still exports normally.
+            if HTML_AUTO_OPEN and reaper.CF_ShellExecute then
+              reaper.CF_ShellExecute(html_name)
+            end
+          else
+            html_name = nil
+          end
+        else
+          html_name = nil
+        end
+
+        reaper.ShowMessageBox("Exported to:\n" .. fname
+          .. (html_name and ("\n" .. html_name) or ""), "MIDI Log Export", 0)
       else
         reaper.ShowMessageBox("Could not write file:\n" .. fname, "MIDI Log Export", 0)
       end

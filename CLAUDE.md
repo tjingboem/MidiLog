@@ -220,8 +220,20 @@ specifically, setting it apart from the value diagrams that come
 after it — every other pair of diagrams gets the usual single blank
 line between them.
 
-Every diagram is fixed at 100 columns wide regardless of how long the
-actual capture was, and every diagram shares the same left margin, so
+A short legend sits directly under the `--- Diagrams ---` header,
+naming the glyphs used below it (added 29 Aug 2026, tjingboem's
+request) — the export gets read on its own, often nowhere near this
+repo, so it should be self-explanatory. It is built per export and
+lists only what that file actually contains: the `/N` line appears
+only if some note used channel 10–16, the value-diagram symbols only
+if there are value diagrams. Its last line gives the grid width and
+ms-per-column, which is what tells a reader how much to trust a dense
+row.
+
+Diagram width is chosen per export from the capture's duration
+(29 Aug 2026), targeting ~25 ms per column and clamped to 100–400
+columns; it was a flat 100. Every diagram in one export shares that
+width and the same left margin, so
 column 1 (elapsed = 0.0, the first note) lines up vertically across
 the *entire* file — you can read straight down through a keyboard
 diagram into a CC diagram below it and see the same instant in time in
@@ -282,6 +294,97 @@ by channel was hiding exactly the pattern this diagram exists to show.
   comment above `channel_digit_glyphs()` in `Log_Export.lua` for the
   full history if this ever needs revisiting.
 
+#### When the row fills up with `[`
+
+This was the shape of a dense row before 29 Aug 2026:
+
+```
+A#1  [[[[4][[7[4[[[[[[[[[5[[[[[[[[[8[1]------------[5[33[[[[[1[3[
+```
+
+Not corruption, and not a fault in the bracket scheme — the diagram
+running out of horizontal resolution. The mechanism is worth keeping
+written down, because it can still happen at the widest grid.
+
+Bars are drawn one after another in onset order, each writing straight
+into the shared row, so a later bar overwrites whatever an earlier one
+put there. `[` is written at the onset column **unconditionally**, so
+when the next note on a pitch starts before the previous bar has
+finished, its opening bracket lands on the earlier note's channel digit.
+Brackets systematically win; digits survive only in the gaps.
+
+Measured on the export that row came from, at the old fixed width of
+100 columns (68.7 ms each): 52 notes on that one pitch, bars 3–4 columns
+wide but starting 1–2 columns apart, **110 writes into already-drawn
+cells**, leaving 45 `[` against 19 digits.
+
+Two changes fixed it. The grid became **adaptive** — about 25 ms per
+column instead of whatever 100 columns happened to give — and the result
+is cut into **panels** so the extra width doesn't wrap. The same row at
+270 columns keeps 123 digits instead of 19, and reads as
+`[11[4[777[44444]` rather than a run of brackets.
+
+It can still degrade, at `DIAGRAM_MAX_WIDTH` on a long capture, so the
+reading rules stay worth knowing:
+
+- **Onsets are still trustworthy.** Every `[` is a real note starting.
+- **Channel identity is not.** Visible digits are the ones that escaped
+  being overwritten — go to the tab-separated rows for the truth.
+- **Durations are gone**, since `]` is overwritten as readily as
+  anything else.
+
+The fix is still to capture less: hit Clear immediately before the
+passage you care about. The `Grid` line in the legend gives the
+ms-per-column, which is what says whether a row can be trusted.
+
+#### Panels
+
+A wide grid produces lines too long for an editor window, and every
+pitch row is the same length — so they all wrap at the same point and
+interleave, row B1's tail printing between row A#1's head and tail. That
+destroys the vertical alignment the diagram exists for, which is worse
+than the collisions were.
+
+So the timeline is cut into panels of at most `PANEL_WIDTH` (200)
+columns, stacked down the page like systems on a musical score. Panels
+are made **equal width** rather than "full ones then a short
+remainder", so each covers the same span of time and they can be
+compared by eye — a 270-column grid becomes two panels of 135, not one
+of 200 plus a stub.
+
+Each panel is a complete keyboard followed by the value lanes for that
+same span, and the series continues from where the previous panel
+stopped; ruler times are absolute, never restarting at zero. Two rules:
+
+- **Every pitch row appears in every panel**, including pitches silent
+  in that slice — the keyboard has to keep its shape or panels can't be
+  compared.
+- **A value lane appears only where that stream moved.** With a real
+  MPE capture — bend, CC74 and pressure on every channel — drawing all
+  of them in every panel would run to hundreds of lines of flat line.
+
+Keeping the value lanes *inside* their panel rather than gathered at the
+end is the point: a note and the expression that shaped it end up in the
+same column of the same block.
+
+#### Streams that never move
+
+A value stream that is constant for the whole capture has nothing to
+plot: eight blank rows and two identical hi/lo labels, once per channel.
+One real capture produced 24 of them in a row, roughly 260 lines of
+nothing. Those are now reported as a single line each, collapsed across
+channels that share a value:
+
+```
+     Constant through this capture, so not plotted:
+       Pitch Wheel (Ch 1-8) = 0
+       CC 74 (Ch 1-8) = 64
+       Chan Press (Ch 1-8) = 0
+```
+
+Summarised rather than dropped — that the stream was present, and what
+it sat at, is real information. It is the *chart* that carries none.
+
 ### Value diagrams (CC, Pitch Wheel, Channel Pressure, Poly Aftertouch)
 
 One diagram **per (message type, identity, channel)** combination —
@@ -323,6 +426,50 @@ intentional, since this is an analysis tool.
   columns in), so the ruler's unit is unambiguous without needing a
   separate label line of its own.
 
+### The HTML page
+
+Every export also writes a `.html` file beside the `.txt`, holding the
+same capture as a drawing. Added 29 Aug 2026.
+
+It exists because every legibility compromise above — bracket widths,
+`/N` units, panels, collisions — is imposed by the fixed grid of a text
+file. A drawing has none of those limits: notes become rectangles at
+their true start and end, and the timeline is one continuous scroll.
+
+Written as **`.html` with the SVG inlined**, not a bare `.svg`, on
+purpose. On a normal Linux desktop `image/svg+xml` is associated with an
+image viewer rather than a browser — it would render, but a rasterising
+viewer doesn't run SVG's interactive layer, so tooltips and channel
+toggles would be dead. `text/html` always opens a browser, and the page
+stays one self-contained file with no assets beside it.
+
+- **Colour carries channel** — the job the digit and `/N` glyphs were
+  straining to do in ASCII.
+- **A dark tick down each note's left edge** marks its onset, the direct
+  equivalent of `[`, and each bar gives back 1.5 px so neighbours
+  separate. Both are needed: consecutive notes on one pitch and channel
+  are the same colour, so without them five notes read as one long one.
+  A gap alone would be ambiguous with a real rest, and vanishes entirely
+  when a note retriggers over its own predecessor — the tick doesn't.
+- **The roll and every value lane live in one `<svg>`**, stacked, inside
+  one scroll container. They share an x axis structurally and scroll
+  together with no synchronisation code.
+- **Hover a note** for pitch, channel, velocity and duration in ms.
+  Velocity appears nowhere in the ASCII diagrams, which have no room.
+- **Channel checkboxes** hide or isolate channels.
+
+The page is additive, never a replacement. In `watch()` the `.txt` is
+written and closed *first*, then the page is attempted inside a
+`pcall` — if it ever throws, the text export is untouched and the
+dialog simply doesn't mention a page. The text stays greppable,
+diffable and pasteable, and is still the better view for counting: five
+`[3` glyphs are countable, five adjacent bars of one colour are not.
+
+Auto-opening the page is behind `HTML_AUTO_OPEN`, off by default. It
+uses SWS's `CF_ShellExecute` where present, guarded so a REAPER without
+SWS still exports normally; plain `os.execute("xdg-open …")` would do
+the same job with no extension at all.
+
 ### Why plain ASCII, no Unicode, no BOM
 
 Three separate rounds of non-ASCII output (circled digits, shape
@@ -353,11 +500,29 @@ JSFX tool in this setup, no build script:
    re-reads the file from disk each time it's launched, no reload
    trick needed, but the *running* watcher instance still has the old
    code loaded in memory until it's stopped and restarted.
-3. **`github.com/tjingboem/Reaper_Scripts` at `JSFX/MidiLog/`** — the
-   public push target, pushed on request rather than automatically.
-   Full detail on this repo relationship (why it's a separate clone,
-   why `~/Downloads/MidiLog` stays the real working copy) is in
-   Claude's own memory, not repeated here.
+3. **`github.com/tjingboem/MidiLog`** — the push target, and the
+   `origin` of the working repo above. MidiLog graduated out of
+   `Reaper_Scripts` into its own repo on 7 Aug 2026; anything still
+   describing `Reaper_Scripts/JSFX/MidiLog/` as the push target is
+   out of date.
+
+Note that the copy under `Effects/` is itself a **separate git clone**
+with no remote, and has drifted — it sits several commits behind and
+carries uncommitted state of its own. Treat it as an install target, not
+a working copy; `~/Downloads/MidiLog` is the real one. A symlink from
+`Effects/` back to the repo would end the drift, and the manual `cp`
+with it.
+
+### What an export writes
+
+Each Export produces two files in `<REAPER resource path>/MidiLogExports/`:
+
+- `midilog_YYYYMMDD_HHMMSS.txt` — the raw log plus the ASCII diagrams
+- `midilog_YYYYMMDD_HHMMSS.html` — the same capture as a drawing
+
+The confirmation dialog names both. See `doc/Reading the export.md` for
+a symbol-by-symbol reference to what is in them — that file is the
+lookup table, this one is the reasoning.
 
 ## History
 
@@ -391,3 +556,42 @@ JSFX tool in this setup, no build script:
   stays visually distinct from one long note -- the plain-digit
   version had no way to show that boundary at all for genuinely
   legato (zero-gap) retriggers.
+- **29 Aug 2026** — a run of diagram work, each step caused by the
+  previous one. A dense 232-note capture exposed that the fixed
+  100-column grid was collapsing busy rows into a run of `[`: bars
+  overwrite in onset order and `[` is written unconditionally, so each
+  note's opening bracket landed on the previous note's channel digit
+  (measured: 110 writes into already-drawn cells on one pitch row, 45
+  brackets left against 19 digits). Made the grid **adaptive** — ~25
+  ms/column, clamped 100–400 — which recovered the digits (19 → 123 on
+  that row) and immediately created the opposite problem: a 275-character
+  line wraps, and since every pitch row is the same length they all wrap
+  at the same point and interleave, destroying the vertical alignment
+  the diagram exists for. Fixed by cutting the timeline into **panels**
+  of equal width, stacked like systems on a score, each a complete
+  keyboard plus the value lanes for that same span. Separately: 24
+  never-moving value streams were producing ~260 lines of blank chart,
+  so **constant streams are now summarised in one line each**, collapsed
+  across channels, and a lane is drawn in a panel **only where it
+  moved**. Added a **legend** under the `--- Diagrams ---` header,
+  built per export so it names only the glyphs that file actually
+  contains — the export is read on its own, often nowhere near this
+  repo. Ruler label spacing now scales with the grid (every 10 columns
+  gave 27 labels once the width moved).
+
+  Then the out-of-the-box one: every remaining compromise above is
+  imposed by the fixed grid of a text file, so an export now also writes
+  an **HTML page with inline SVG** beside the `.txt` — notes as
+  rectangles at their true start and end, colour for channel, a dark
+  onset tick plus a 1.5 px gap so consecutive same-channel notes don't
+  merge into one bar, value lanes in the same `<svg>` sharing the x
+  axis, hover tooltips carrying velocity, and channel toggles. `.html`
+  rather than `.svg` because Linux associates SVG with an image viewer,
+  which renders but runs none of the interactive layer. Additive only:
+  the `.txt` is written and closed first and the page is built inside a
+  `pcall`, and the text remains the better view for counting sequential
+  notes on one channel — countable glyphs beat a continuous drawing when
+  the question is "how many".
+
+  Also added `doc/Reading the export.md`, a symbol-by-symbol reference
+  for people reading an export, as distinct from this file's reasoning.
