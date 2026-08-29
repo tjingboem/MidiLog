@@ -509,9 +509,14 @@ JSFX tool in this setup, no build script:
 Note that the copy under `Effects/` is itself a **separate git clone**
 with no remote, and has drifted — it sits several commits behind and
 carries uncommitted state of its own. Treat it as an install target, not
-a working copy; `~/Downloads/MidiLog` is the real one. A symlink from
-`Effects/` back to the repo would end the drift, and the manual `cp`
-with it.
+a working copy; `~/Downloads/MidiLog` is the real one.
+
+Copying by hand is a **deliberate choice, not an oversight** (tjingboem,
+29 Aug 2026). A symlink from `Effects/` back to the repo would end the
+drift and the `cp` with it, and was offered and declined — the manual
+step stays for now, so that what REAPER loads only changes when it is
+explicitly put there. Worth re-reading this before proposing the
+symlink again.
 
 ### What an export writes
 
@@ -595,3 +600,13 @@ lookup table, this one is the reasoning.
 
   Also added `doc/Reading the export.md`, a symbol-by-symbol reference
   for people reading an export, as distinct from this file's reasoning.
+
+- **29 Aug 2026, considered and declined** — a vertical "tracker" view
+  of the notes, time running down the page and pitch across, which
+  would have made line width depend on pitch range rather than capture
+  length and so never wrapped or needed panels. Prototyped as a layout
+  (75 characters wide for a 17-semitone span, onsets as the channel
+  number, sustains as `|`) and dropped before any Lua was written: it
+  reads note timing and channel precisely but loses melodic shape,
+  which the horizontal roll gives for free, and the HTML page had by
+  then solved the width problem outright. No code for it exists.
