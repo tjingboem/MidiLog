@@ -635,7 +635,16 @@ local(idx, visible_count)
 );
 
 // -------------------------------------------------------------
-top_margin=(gfx_texth + 4.0) * 2;
+// header_gap, 9 Sep 2026: a bit of breathing space between the green
+// button-row highlight band and the "Seq TimePos..." column header
+// line below it -- they used to sit flush against each other, zero
+// gap. top_margin has to grow by the same amount so the scrollbar,
+// row-hit-testing, and where log rows actually start all stay in sync
+// with the header's real (now taller) height -- see the matching
+// += below, where the column header line's own y-position is pushed
+// down by this same amount.
+header_gap = 8 * gfx_ext_retina;
+top_margin=(gfx_texth + 4.0) * 2 + header_gap;
 scroll_width = top_margin /2;
 g_histsize = ((hist_size/ent_size)|0);
 g_viewsize = (((gfx_h-top_margin-1)/(gfx_texth+2))|0);
@@ -777,14 +786,19 @@ gfx_w != g_lw || gfx_h != g_lh ||  g_force_redraw ? (
   // itself rather than relying on the dimmer color alone. Padded to the
   // same 7-char width as "Log OFF" so Clear/Notes/MPE don't shift right
   // of it when the label text changes.
-  log_active ? gfx_printf("Log    ") : gfx_printf("Log OFF");
+  log_active ? gfx_printf("Log ON ") : gfx_printf("Log OFF");
   g_logx_e = gfx_x;
 
   gfx_x += gfx_texth * 2; // casrya: add scaling
 
   g_cap == 3 && g_capst ? (
     g_lx=gfx_x;
-    gfx_y=0; gfx_r=1; gfx_g=gfx_b=0; gfx_rectto(gfx_x+3*gfx_texth,top_margin/2); // casrya: add scaling
+    // Fixed 9 Sep 2026: was a flat 3*gfx_texth-wide flash box, sized for
+    // a short label like "Log" -- "Clear&Ready" (11 characters) is much
+    // wider, so only "Clear" was actually lighting up red on click.
+    // Measure the real label text instead of guessing a fixed width.
+    gfx_measurestr("Clear&Ready", clearready_w, clearready_h);
+    gfx_y=0; gfx_r=1; gfx_g=gfx_b=0; gfx_rectto(gfx_x+clearready_w,top_margin/2);
     gfx_x=g_lx;
     gfx_y=2;
   );
@@ -826,7 +840,11 @@ gfx_w != g_lw || gfx_h != g_lh ||  g_force_redraw ? (
   // matching Log's own convention of brighter = engaged.
   g_cap == 5 && g_capst ? (
     g_lx=gfx_x;
-    gfx_y=0; gfx_r=1; gfx_g=gfx_b=0; gfx_rectto(gfx_x+3*gfx_texth,top_margin/2);
+    // Fixed 9 Sep 2026: same fixed-width flash-box issue as Clear&Ready
+    // above -- "Note Filter" (11 characters) is wider than the flat
+    // 3*gfx_texth box was sized for.
+    gfx_measurestr("Note Filter", notefilter_flash_w, notefilter_flash_h);
+    gfx_y=0; gfx_r=1; gfx_g=gfx_b=0; gfx_rectto(gfx_x+notefilter_flash_w,top_margin/2);
     gfx_x=g_lx;
     gfx_y=2;
   );
@@ -839,7 +857,11 @@ gfx_w != g_lw || gfx_h != g_lh ||  g_force_redraw ? (
 
   g_cap == 6 && g_capst ? (
     g_lx=gfx_x;
-    gfx_y=0; gfx_r=1; gfx_g=gfx_b=0; gfx_rectto(gfx_x+3*gfx_texth,top_margin/2);
+    // Fixed 9 Sep 2026: same fixed-width flash-box issue as Clear&Ready
+    // and Note Filter above -- "MPE Filter" (10 characters) is wider
+    // than the flat 3*gfx_texth box was sized for.
+    gfx_measurestr("MPE Filter", mpefilter_flash_w, mpefilter_flash_h);
+    gfx_y=0; gfx_r=1; gfx_g=gfx_b=0; gfx_rectto(gfx_x+mpefilter_flash_w,top_margin/2);
     gfx_x=g_lx;
     gfx_y=2;
   );
@@ -910,7 +932,7 @@ gfx_w != g_lw || gfx_h != g_lh ||  g_force_redraw ? (
   gfx_x = icon_save_x; gfx_y = icon_save_y;
   gfx_r = icon_save_r; gfx_g = icon_save_g; gfx_b = icon_save_b; gfx_a = icon_save_a;
 
-  gfx_x =0; gfx_y += gfx_texth + 2; // casrya: add scaling
+  gfx_x =0; gfx_y += gfx_texth + 2 + header_gap; // casrya: add scaling
   gfx_printf("   Seq  TimePos    Bus  Chan    Type            Ident");
   // casrya: use gfx_x to display Value header since we use gfx_x for actual value display so we need to match scaling
   // NOTE: not sure why val_pos_x was not sufficient. Maybe because font width is not scaled proportionally and there is no gfx_textw?
