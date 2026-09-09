@@ -756,15 +756,43 @@ family's other tool icons (`~/Downloads/icons/Mask.png` etc.).
   `gfx_b`/`gfx_a` around the blit so it doesn't disturb the header row's
   own cursor bookkeeping, which continues immediately afterward.
 
-**Path resolution for `gfx_loadimg`'s relative filename is not
-something I could verify live** -- JSFX can't be run in this
-environment. Written to match the documented convention (relative to
-the effect's own directory, same as JSFX's read-only `file_open()`),
-and `MidiLog.png` is placed right next to `MidiLog.jsfx` in both the
-repo and the deployed `Effects/` copy on that assumption. **This needs
-tjingboem's own eyes in REAPER before it's considered working** -- if
-the icon doesn't appear, check this path resolution first, not the
-blit call itself.
+**Confirmed working in REAPER, 9 September 2026 -- after a real bug,
+not a path problem.** The icon came up blank the first time
+(`gfx_loadimg` returned 0). Debugged with an isolated throwaway JSFX
+(`IconTest.jsfx`, same method already established in this family --
+see `ReaTjingboem/CLAUDE.md`, "How to settle a REAPER/JSFX behaviour
+question"), not by guessing further:
+
+- Fetched the real SDK docs (`reaper.fm/sdk/js/gfx.php`, tjingboem's
+  own link): `gfx_loadimg(image, filename)` returns the image index
+  (e.g. 100, the handle passed in) on success, **-1** on failure --
+  not the packed-w*h-value convention this file originally assumed,
+  and the valid slot range is **0-127**, not 0-1023 as first written.
+- Absolute path, relative path, REAPER's own `Data/` folder, a
+  trivial plain-RGB test image with no alpha channel -- all still
+  returned exactly `0`. Confirmed via `%f` formatting and explicit
+  `== -1`/`== 0` checks that this was a genuine `0.0`, not a `%d`
+  display bug hiding a real `-1`.
+- Confirmed `@init` itself was genuinely running (a `42` sentinel
+  printed correctly), ruling out "the code never executes" as an
+  explanation.
+- **The actual cause: `gfx_loadimg` was being called from `@init`,
+  before any graphics context exists yet.** Moving the identical call
+  into `@gfx` (guarded to run once, on the first frame only) made it
+  return `100` immediately and the test image blit correctly. **This
+  isn't written down anywhere in the SDK docs** -- found by measuring,
+  not by reading a reference.
+
+Fixed in the real file the same way: `midilog_icon_h` and
+`midilog_icon_attempted` are set up in `@init`, but the actual
+`gfx_loadimg` call and the `midilog_icon_ok` check now happen inside
+`@gfx`, gated on `midilog_icon_attempted == 0` so it only runs once.
+Relative filename (`"MidiLog.png"`) works fine now that the timing is
+right -- path resolution was never actually the problem, it was
+masked by every attempt failing at the loading stage before path
+resolution could even matter. **tjingboem confirmed the icon now
+shows** in the real running plugin, top-right of the header row, next
+to Export.
 
 Deployed (plain `cp`, no build step) to
 `~/.config/REAPER/Effects/tjingboem/MidiLog/`, diff-confirmed identical

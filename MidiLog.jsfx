@@ -236,17 +236,19 @@ gfx_clear=-1;
 
 load_CC_names();
 
-// Icon, 9 Sep 2026: loads MidiLog.png, which has to sit right next to
-// this .jsfx file (relative paths for gfx_loadimg resolve against the
-// effect's own directory, same convention as JSFX's read-only
-// file_open()) -- see the header-row draw code in @gfx for where it's
-// actually blitted. midilog_icon_h is a plain handle index (any value
-// 0-1023 works; picked one unlikely to collide with anything else in
-// this file, which loads no other images). midilog_icon_ok stays 0 if
-// the file isn't found, so the draw call can skip cleanly instead of
-// drawing a blank/broken image.
+// Icon, 9 Sep 2026: sets up the handle only. The actual gfx_loadimg()
+// call has to happen in @gfx, not here -- measured directly, 9 Sep
+// 2026: calling it from @init returns 0 every time (no graphics
+// context exists yet at that point), not the -1 the SDK docs describe
+// for a real failure. Not documented anywhere; found by an isolated
+// test file, not by reasoning about it. See the header-row draw code
+// in @gfx for the real load call and where the image is blitted.
+// midilog_icon_h is a plain handle index (0-127 -- confirmed via the
+// SDK docs this is gfx_loadimg's real valid range, not 0-1023 as
+// first assumed); picked one unlikely to collide with anything else
+// in this file, which loads no other images.
 midilog_icon_h = 100;
-midilog_icon_ok = gfx_loadimg(midilog_icon_h, "MidiLog.png") >= 0;
+midilog_icon_attempted = 0;
 
 
 // ======================================================================
@@ -884,17 +886,29 @@ gfx_w != g_lw || gfx_h != g_lh ||  g_force_redraw ? (
   // since this window gets resized in real use. Saves/restores the
   // drawing cursor and color around itself so it doesn't disturb the
   // header row's own gfx_x/gfx_y bookkeeping that continues right after.
+  icon_save_x = gfx_x; icon_save_y = gfx_y;
+  icon_save_r = gfx_r; icon_save_g = gfx_g; icon_save_b = gfx_b; icon_save_a = gfx_a;
+  icon_size = 30 * gfx_ext_retina;
+
+  // The actual load, done here rather than @init -- see the @init
+  // comment above for why. Attempted once, on the first @gfx frame
+  // only; midilog_icon_ok stays 0 if the file genuinely isn't found
+  // (a real -1 this time, now that a graphics context exists), so the
+  // blit below skips cleanly instead of drawing a blank/broken image.
+  midilog_icon_attempted == 0 ? (
+    midilog_icon_result = gfx_loadimg(midilog_icon_h, "MidiLog.png");
+    midilog_icon_ok = midilog_icon_result >= 0;
+    midilog_icon_attempted = 1;
+  );
+
   midilog_icon_ok ? (
-    icon_save_x = gfx_x; icon_save_y = gfx_y;
-    icon_save_r = gfx_r; icon_save_g = gfx_g; icon_save_b = gfx_b; icon_save_a = gfx_a;
-    icon_size = 30 * gfx_ext_retina;
     gfx_x = gfx_w - icon_size - 6;
     gfx_y = max(0, (top_margin/2 - icon_size) / 2);
-    gfx_a = 1;
+    gfx_r=1; gfx_g=1; gfx_b=1; gfx_a = 1;
     gfx_blit(midilog_icon_h, gfx_ext_retina, 0);
-    gfx_x = icon_save_x; gfx_y = icon_save_y;
-    gfx_r = icon_save_r; gfx_g = icon_save_g; gfx_b = icon_save_b; gfx_a = icon_save_a;
   );
+  gfx_x = icon_save_x; gfx_y = icon_save_y;
+  gfx_r = icon_save_r; gfx_g = icon_save_g; gfx_b = icon_save_b; gfx_a = icon_save_a;
 
   gfx_x =0; gfx_y += gfx_texth + 2; // casrya: add scaling
   gfx_printf("   Seq  TimePos    Bus  Chan    Type            Ident");
