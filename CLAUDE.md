@@ -692,3 +692,85 @@ exist yet for the real manual either. Same next step as every other
 tool in this family: capture them once the manual's text is confirmed
 to read correctly, then place them (this file's placeholders mark
 roughly where they'd go).
+
+## Icon designed and drawn into the JSFX itself, 9 September 2026
+
+tjingboem wanted an icon so `Log_Export.lua` could get a toolbar
+button, and separately wanted the same image drawn inside
+`MidiLog.jsfx`'s own window so the two files visibly "belong to each
+other" -- otherwise it's just two unrelated-looking things a new user
+has to discover need to run together.
+
+**Design process, several iterations, each corrected by tjingboem
+looking at the actual pixels:** a log + musical note combo read as
+mud at true 30x30 size ("hard to see it is a log"); a log-only
+top-down tree-ring cross-section read as "just a circle" once the note
+was dropped, since concentric rings don't survive shrinking as
+distinctly as a whole recognizable shape does; the final version is
+the log viewed from the side (a rounded bark-coloured cylinder with
+one end shown face-on, rings and all) -- which tjingboem correctly
+called out as "Picasso-like" (an impossible combined perspective, side
+view of the body with a face-on view of the cut end at the same time)
+and then accepted anyway, since the anatomically correct foreshortened
+ellipse would read as a smudge rather than rings at this size. Built
+with PIL, drawn large (300px) and downsampled with Lanczos filtering
+for clean anti-aliased edges at the real 30x30 size, matching the
+flat/simple/single-silhouette style already established by this
+family's other tool icons (`~/Downloads/icons/Mask.png` etc.).
+
+**Two separate files, not one, since they serve different purposes:**
+
+- **`MidiLog.png`** (30x30, single frame) -- drawn inside
+  `MidiLog.jsfx`'s own `@gfx` window.
+- **`MidiLog_toolbar.png`** (90x30, three 30x30 frames side by side) --
+  for assigning as `Log_Export.lua`'s REAPER toolbar button icon.
+  tjingboem: "what is needed is 3 of these... side by side, so when you
+  click it changes to the second, and right-click shows the third."
+  Confirmed the *format* (REAPER's real multi-state toolbar icon
+  convention -- one image, 3x as wide as tall) but flagged real
+  uncertainty about the *exact* trigger for the third frame -- tjingboem
+  has built these before and knows from experience; I don't, and
+  didn't want to assert an unverified detail as fact. Built as three
+  tone variants of the same log artwork (normal warm brown, brighter
+  warm/lit, and a cool blue-grey) so any REAPER-triggered state is at
+  least visually distinct -- needs live testing in REAPER to confirm
+  which frame actually shows when.
+
+**Drawing the icon into `MidiLog.jsfx` itself:**
+
+- `@init` (right after `load_CC_names()`, the file's last real
+  top-level init statement before `@block`): `gfx_loadimg(midilog_icon_h,
+  "MidiLog.png")`, handle 100 (arbitrary, checked no collision with any
+  other variable name in the file first). `midilog_icon_ok` is set from
+  the load's own return value so the draw call can skip cleanly if the
+  file isn't found, rather than blitting a broken image.
+- `@gfx`, inside the header-row block, right after the button-row's
+  green highlight strip is drawn and `gfx_a`/`gfx_y` are restored, before
+  the column-header line ("   Seq  TimePos ...") is printed. Anchored to
+  **live** `gfx_w` (`gfx_w - icon_size - 6`), not the `@gfx 400 800`
+  declaration's initial width, since this window gets resized in real
+  use and a fixed offset would drift off-screen or overlap the buttons
+  depending on how wide the user's made it. Scaled by `gfx_ext_retina`,
+  matching the same HiDPI convention the rest of the header already uses
+  for its font size. Saves and restores `gfx_x`/`gfx_y`/`gfx_r`/`gfx_g`/
+  `gfx_b`/`gfx_a` around the blit so it doesn't disturb the header row's
+  own cursor bookkeeping, which continues immediately afterward.
+
+**Path resolution for `gfx_loadimg`'s relative filename is not
+something I could verify live** -- JSFX can't be run in this
+environment. Written to match the documented convention (relative to
+the effect's own directory, same as JSFX's read-only `file_open()`),
+and `MidiLog.png` is placed right next to `MidiLog.jsfx` in both the
+repo and the deployed `Effects/` copy on that assumption. **This needs
+tjingboem's own eyes in REAPER before it's considered working** -- if
+the icon doesn't appear, check this path resolution first, not the
+blit call itself.
+
+Deployed (plain `cp`, no build step) to
+`~/.config/REAPER/Effects/tjingboem/MidiLog/`, diff-confirmed identical
+for both `MidiLog.jsfx` and `MidiLog.png`. Per this file's own "Where
+the files live" section above: REAPER does not hot-reload an
+externally-edited JSFX into an already-open FX instance -- remove and
+re-insert the effect (or reload all JSFX plugins) to actually see the
+icon, the same gotcha that's cost back-and-forth before. Not yet
+committed to git.

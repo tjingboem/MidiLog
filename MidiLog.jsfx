@@ -236,6 +236,18 @@ gfx_clear=-1;
 
 load_CC_names();
 
+// Icon, 9 Sep 2026: loads MidiLog.png, which has to sit right next to
+// this .jsfx file (relative paths for gfx_loadimg resolve against the
+// effect's own directory, same convention as JSFX's read-only
+// file_open()) -- see the header-row draw code in @gfx for where it's
+// actually blitted. midilog_icon_h is a plain handle index (any value
+// 0-1023 works; picked one unlikely to collide with anything else in
+// this file, which loads no other images). midilog_icon_ok stays 0 if
+// the file isn't found, so the draw call can skip cleanly instead of
+// drawing a blank/broken image.
+midilog_icon_h = 100;
+midilog_icon_ok = gfx_loadimg(midilog_icon_h, "MidiLog.png") >= 0;
+
 
 // ======================================================================
 @block
@@ -862,6 +874,27 @@ gfx_w != g_lw || gfx_h != g_lh ||  g_force_redraw ? (
   gfx_rectto(g_exportx_e, top_margin/2);
   gfx_a=1;
   gfx_y=2; // casrya: restore so the header line's += below lands correctly
+
+  // Icon, 9 Sep 2026: MidiLog.jsfx and Log_Export.lua are two separate
+  // files that have to be run together (see CLAUDE.md, "The two parts,
+  // and why there are two") -- drawing the same icon here that's also
+  // assigned as Log_Export.lua's toolbar button is meant to make that
+  // pairing visible at a glance, not just documented. Anchored to the
+  // live window width (gfx_w), not the @gfx declaration's initial 400,
+  // since this window gets resized in real use. Saves/restores the
+  // drawing cursor and color around itself so it doesn't disturb the
+  // header row's own gfx_x/gfx_y bookkeeping that continues right after.
+  midilog_icon_ok ? (
+    icon_save_x = gfx_x; icon_save_y = gfx_y;
+    icon_save_r = gfx_r; icon_save_g = gfx_g; icon_save_b = gfx_b; icon_save_a = gfx_a;
+    icon_size = 30 * gfx_ext_retina;
+    gfx_x = gfx_w - icon_size - 6;
+    gfx_y = max(0, (top_margin/2 - icon_size) / 2);
+    gfx_a = 1;
+    gfx_blit(midilog_icon_h, gfx_ext_retina, 0);
+    gfx_x = icon_save_x; gfx_y = icon_save_y;
+    gfx_r = icon_save_r; gfx_g = icon_save_g; gfx_b = icon_save_b; gfx_a = icon_save_a;
+  );
 
   gfx_x =0; gfx_y += gfx_texth + 2; // casrya: add scaling
   gfx_printf("   Seq  TimePos    Bus  Chan    Type            Ident");
