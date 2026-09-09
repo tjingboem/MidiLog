@@ -1,4 +1,4 @@
-# MidiLog — manual
+# MidiLog — working handover
 
 MidiLog is a JSFX MIDI-monitoring and analysis effect (`MidiLog.jsfx`,
 originally DarkStar 2018 + casrya 2025/2026, extended further 6–8 Aug
@@ -188,6 +188,21 @@ when idle).
 
 It stays running until you stop it from the Actions list, or close the
 REAPER session.
+
+**Self-reload — built, then declined, 29 Aug 2026.** A version of
+`watch()` was written that checked its own file for on-disk changes
+roughly once a second, `dofile()`-ing itself on a change so the watcher
+never needed a manual stop/restart after an edit. It worked (generation
+counter to stop the old chain, `pcall`-guarded against a mid-write
+reload), and was briefly deployed to the live `Effects/` copy. Declined
+before being committed: it's a script polling forever in the
+background purely to save one manual step, the same shape of thing as
+the `Effects/`-symlink idea already turned down elsewhere in this
+family — tjingboem prefers the copy/restart to stay an explicit,
+occasional action rather than something running continuously. Don't
+re-propose a self-watching reload for this or any sibling script;
+stopping and restarting `Log_Export.lua` by hand after an edit is the
+intended, kept behavior.
 
 ## Auto-starting the watcher
 
@@ -610,3 +625,70 @@ lookup table, this one is the reasoning.
   reads note timing and channel precisely but loses melodic shape,
   which the horizontal roll gives for free, and the HTML page had by
   then solved the width problem outright. No code for it exists.
+
+## Real user manual written, 9 September 2026 -- `doc/MidiLog.odt`
+
+MidiLog is going out as donationware ("useful for other users, that
+perhaps want to make a donation or not" -- tjingboem), so it needed an
+actual manual, not just this handover. tjingboem had already created
+`doc/MidiLog.odt` and pasted `doc/Reading the export.md` into it as a
+starting point (as raw, unstyled Markdown text -- literal `#`/`|`
+characters, not real headings or tables).
+
+Rebuilt as a full seven-chapter manual, following the same guided-path
+structure ReaSnap's and ReaMaskM's manuals already use -- Overview
+first, reference material last:
+
+1. **Overview** -- what MidiLog is, and the two-file split (why it
+   exists: JSFX cannot write files or call REAPER's API directly) up
+   front, since that's the first thing that would otherwise confuse a
+   new user.
+2. **Getting Started** -- loading the JSFX effect, separately launching
+   `Log_Export.lua` (and that it has to *stay* running), and a
+   concrete way to confirm the two-part setup actually worked.
+3. **The On-Screen Window** -- the five header buttons and the log
+   table, adapted from this file's own "On-screen window" section
+   above.
+4. **Timing: TimePos vs. Elapsed** -- adapted from "Timing model"
+   above, trimmed to what a user needs (not the internal variable
+   names).
+5. **Exporting** -- what actually happens on click, where the files
+   land.
+6. **Reading an Export** -- `doc/Reading the export.md`'s content in
+   full, converted from Markdown into real ODF headings and tables
+   (five tables: the raw log's columns, keyboard-diagram symbols,
+   narrow-bar behavior, value-diagram symbols, HTML page elements).
+7. **Support MidiLog** -- a short donationware line. No donation
+   link/platform specified -- tjingboem hasn't given me one, and I'm
+   not fabricating one; add it by hand when there's a real link to put
+   there.
+
+**Styling matches the family look** established for ReaMaskM's and
+ReaSnap's own manuals: navy (`#1f3864`) bold headings with a blue
+bottom-border banner for chapters, and the same navy-header/light-blue-
+first-column/gray-border table treatment already used in ReaSnap.docx
+and (originally) MidiCloud.odt -- built as new automatic styles inside
+`content.xml` (`MLH1`/`MLH2`/`MLTbl2`/`MLTbl3`/etc.) rather than reusing
+another file's styles.xml, since this file's own default LibreOffice
+styles had nothing usable (checked directly -- no navy heading style,
+no table style existed in it before this).
+
+Built by replacing the entire body content in one pass (title page +
+all seven chapters), validated via `ET.fromstring` *before* writing to
+disk (not after) -- the discipline established in ReaSnap's own
+CLAUDE.md after a real mid-session corruption there. Packaged with
+`mimetype` stored first and uncompressed, per the standing ODF
+requirement. Backup at `doc/MidiLog.odt.bak-2026-09-09-preFullManual`.
+Not yet committed to git.
+
+**Also fixed in passing:** this file's own title said "MidiLog --
+manual," which was accurate before today but now collides with the
+real manual's existence -- retitled to "MidiLog -- working handover,"
+matching every sibling tool's own `CLAUDE.md` naming convention.
+
+**Not done, deliberately left for tjingboem:** every `[screenshot
+placeholder]` marker in this file is still just that -- no screenshots
+exist yet for the real manual either. Same next step as every other
+tool in this family: capture them once the manual's text is confirmed
+to read correctly, then place them (this file's placeholders mark
+roughly where they'd go).
