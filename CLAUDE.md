@@ -802,3 +802,150 @@ externally-edited JSFX into an already-open FX instance -- remove and
 re-insert the effect (or reload all JSFX plugins) to actually see the
 icon, the same gotcha that's cost back-and-forth before. Not yet
 committed to git.
+
+## Two possible new capabilities -- #2 fully designed but DEFERRED TO v2, 10 September 2026
+
+**"Load Capture" (capability 2 below) is explicitly deferred to MidiLog
+v2, tjingboem's own call, same day it was designed:** "lets not add
+this idea of midi reconstruction to MidiLog right now. That is
+something for version 2." Also recorded in `ReaTjingboem/CLAUDE.md`
+(item 14) as the cross-repo pointer. Not a "pick this up next" item --
+leave it here as a complete design for whenever v2 actually starts.
+
+tjingboem's own final framing, closing out a design conversation that
+started from "can MidiLog be a VST3 plugin" (see `ReaTjingboem/
+CLAUDE.md` item 13 and this repo's own donation-gate note for that,
+unrelated to what follows): MidiLog now has two distinct jobs, one
+already done and one not yet built.
+
+**1. Analyzing MIDI data via text and HTML -- already built, no change.**
+Export's existing `.txt`/`.html` output is enough for offline analysis
+on its own; tjingboem explicitly confirmed this after considering
+reloading a capture back into MidiLog's own live view ("I now think
+that text and the html is enough to go through the data offline").
+
+**2. "Load Capture" -- getting a previous export's data back into
+MidiLog's live view, AND reconstructing it as a real MIDI item.** Two
+outcomes from one action, not two separate features each re-parsing
+the file:
+
+- **Redisplay**: read a previously-exported `.txt`, parse it, push the
+  events through the existing `gmem[]` bridge (the same one `Log_
+  Export.lua` already uses for Export, just reversed) into `MidiLog.
+  jsfx`'s own display buffer -- repopulates the on-screen table and
+  diagrams exactly as if captured live. No new architecture, same
+  proven pipeline.
+- **Reconstruction**: a pure Lua-side operation (no JSFX/`gmem`
+  involvement needed here at all) -- read the `.txt`, and call the
+  same `MIDI_InsertNote`/`MIDI_InsertCC` API every other tool in this
+  family already uses, building a real, editable REAPER MIDI item from
+  the captured data. This is the piece that actually matters most:
+  it turns a captured performance into something every other tool in
+  this family can work on afterward -- including ReaShapeM's own new
+  Interval Scaling/Pitch Compression/Duration Scale/Velocity Scale
+  passes (see `reashapem-envelope-ideas` in memory) -- not just
+  something MidiLog itself can re-view.
+
+**Two real design decisions already made, tjingboem's own calls:**
+- **Placement uses Elapsed, not TimePos.** "We are talking about
+  reconstructing data back to a Midi Item, because the user wants that
+  structure back, not the place in the composition." TimePos ties the
+  data to a specific project timeline that may no longer be relevant;
+  Elapsed (re-based to start at 0, or wherever the item lands) lets the
+  performance be reconstructed anywhere, in any project.
+- **Bus DOES need a separate track per bus on reconstruction --
+  corrected 10 Sept 2026, reversing the original call below.**
+  Original reasoning ("bus stays informational, not split into
+  separate takes -- MIDI channel already carries 'sent to different
+  instruments' in practice") was wrong on a real point, caught by
+  tjingboem asking directly whether REAPER's bus system requires a
+  separate track per bus. Verified via REAPER's own JSFX MIDI
+  reference (`reaper.fm/sdk/js/midi.php`) and a KVR Audio forum
+  answer: an item's raw MIDI data CAN be tagged with different bus
+  numbers (valid range 0-15) within one take, but "any FX in REAPER
+  receives MIDI from all channels on a specific MIDI Bus... that is
+  not possible without using multiple tracks" -- i.e. a track's FX
+  chain only ever listens to one bus at a time, so different buses
+  only actually reach different instruments if each bus has its own
+  track. tjingboem's own capture data already shows Bus as a real,
+  used column (not always 1), so reconstructing multi-bus captures
+  onto a single take would silently discard the very thing that made
+  the buses meaningful in the first place -- different instruments
+  genuinely wouldn't receive their intended data. **Corrected design:
+  reconstruction groups captured events by Bus, creating one new
+  track + MIDI item per distinct bus value found in the capture**, MIDI
+  channel (1-16) preserved within each of those per the original
+  design. Single-bus captures (the common case, per the earlier
+  observation that bus 1 is typical) still produce exactly one track,
+  so this only adds complexity when the source data actually needs it.
+
+Not started. Pick this up by reading `Log_Export.lua`'s existing write
+path first (the exact `.txt` column format is already the de facto
+spec for the reader), then decide where "Load Capture" lives -- most
+likely a new Lua companion action alongside `Log_Export.lua`, matching
+this repo's existing two-file split (JSFX can't do file I/O or call
+`MIDI_InsertNote`, so the reconstruction half has to be Lua regardless
+of where redisplay ends up).
+
+## Second v2 item: log System Common/Realtime messages, and lift the SysEx 8-byte cap -- 10 September 2026
+
+tjingboem, comparing MidiLog against MIDI-OX as a reference analytic
+tool: "I do think... that Sysex partially and MIDI Time Code, Song
+Position Pointer, or realtime transport messages (Clock/Start/Stop)
+are not reported. Midiox does show these." Confirmed true by reading
+the actual code, not assumed -- and confirmed these messages
+genuinely reach this JSFX in real use, not just in theory, so this
+isn't dead-code-avoidance territory. Explicitly deferred to v2 by
+tjingboem's own call, same "feels like a version 2 thing to me"
+treatment as the Load Capture idea above -- not started.
+
+**What's actually missing, verified against the code:**
+
+- **System Common/Realtime (status bytes 0xF1-0xFF) are deliberately
+  skipped**, not an oversight -- there's already a real comment
+  explaining why (they share status nibble 0xF, so the existing
+  channel-message parser's assumptions about byte counts don't apply),
+  dated 6 Aug 2026, crediting "casrya." Still forwarded untouched via
+  `midisend_buf`, just never written into the log. The comment's own
+  wording ("not logged **for now**") already reads as deferred, not
+  permanent.
+- **SysEx is truncated at exactly 8 bytes, in storage, not just
+  display.** `ent_sysex_cnt` records the true length, but only 8 bytes
+  of actual payload are ever captured (two 32-bit array slots per
+  entry, per the code's own comment). A short SysEx message is fully
+  captured; a long one (e.g. a patch dump) is silently missing
+  everything past its 8th byte, both on screen and in Export. Fixing
+  this means widening the per-entry storage layout, not just a loop
+  bound -- a bigger, structural change compared to adding the missing
+  message types.
+
+**Confirmed these messages actually arrive in real use, via a real
+forum account of a near-identical logger JSFX** (`forum.cockos.com/
+archive/index.php/t-189126.html`, "MIDI Logger - pimped") -- a user
+reported Active Sensing messages genuinely showing up from a real
+Yamaha keyboard when a similar logger JSFX was used as a track insert
+FX. tjingboem: "it may have been me that made that comment." Possibly
+the same person, on the other side of this exact question years later.
+
+**Real design split needed if this gets built, not a single change:**
+Active Sensing (continuous keep-alive, ~300ms) and MIDI Clock (24
+pulses per quarter note during playback -- far higher volume than
+Active Sensing) would flood the log if logged per-event the normal
+way -- there's no value to deduplicate against, it's the identical
+message repeated constantly. tjingboem's own framing: "shouting all
+the time 'I am here' is interesting for the DAW but clutters the
+screen." These two need either exclusion or a collapsed presence
+indicator ("Clock running" / "Active Sensing: yes"), not a row per
+message. The rest of the currently-skipped set -- Start, Stop,
+Continue, Song Position Pointer, Song Select, Tune Request, MTC
+Quarter Frame -- are one-off/occasional events, not continuous
+streams, and would log fine as normal individual rows like everything
+else already does.
+
+Not started. Pick this up by reading the existing `midi_buf[0] >=
+$xF1` skip branch first (`MidiLog.jsfx`, in the main capture loop) --
+that's exactly where the new per-status-byte handling would replace
+the current no-op skip, split into "log as one row" (System Common)
+vs. "collapse to a presence indicator, don't log per-event" (Active
+Sensing, Clock) vs. "leave the storage-layout question for its own
+pass" (SysEx beyond 8 bytes).

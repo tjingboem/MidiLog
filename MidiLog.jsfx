@@ -587,22 +587,30 @@ local(ptr, endptr, msg, dnum1, dnum2, tnum1, pb_value, sysex_cnt, si, val, gpos,
 // real CC74 messages whenever their value wasn't 74. msg2 (the real CC
 // number) sits at bits 8-15, i.e. (msg>>8)&255.
 function is_entry_hidden(ptr)
-local(msg, mtype, mnum, is_dup, is_mpe_type)
+local(msg, mtype, mnum, is_dup, is_mpe_only, is_dedup_candidate)
 (
   msg = ptr[ent_midiinfo];
   mtype = (msg/16)&15;
   mnum  = (msg>>8)&255;
   is_dup = (msg>>24)&1;
-  is_mpe_type = mtype == 13 || mtype == 14 || (mtype == 11 && mnum == 74);
+  // Split 10 Sept 2026, tjingboem: CC74 is MPE's Y-axis convention, but
+  // far more commonly just a plain filter-cutoff CC on non-MPE synths --
+  // hiding it under "MPE Filter" conflated those two contexts. Pitch
+  // Wheel/Channel Pressure are unambiguously MPE-only; CC74 no longer is,
+  // for the *visibility* check below, but it still deserves the same
+  // dedup treatment a continuously-streaming controller needs regardless
+  // of what it's being used for, so it stays in that second set.
+  is_mpe_only        = mtype == 13 || mtype == 14;
+  is_dedup_candidate = is_mpe_only || (mtype == 11 && mnum == 74);
   ptr[ent_sysex_cnt] == 0 && (
     (filter_hide_notes && (mtype == 8 || mtype == 9))
-    || (filter_hide_mpe && is_mpe_type)
+    || (filter_hide_mpe && is_mpe_only)
     // "only print when it changes", 5 Aug 2026: an MPE entry flagged as
     // an exact repeat of the previous value for its own channel (set at
     // capture time, see set_history_common() call site) is hidden
     // regardless of the Hide MPE switch's own state -- deduplication is
     // useful any time MPE data is visible at all, not just in isolation.
-    || (is_dup && is_mpe_type)
+    || (is_dup && is_dedup_candidate)
   );
 );
 
