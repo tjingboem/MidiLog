@@ -887,15 +887,34 @@ this repo's existing two-file split (JSFX can't do file I/O or call
 `MIDI_InsertNote`, so the reconstruction half has to be Lua regardless
 of where redisplay ends up).
 
-## Second v2 item: log System Common/Realtime messages, and lift the SysEx 8-byte cap -- 10 September 2026
+## Second v2 item: log System Common/Realtime messages -- SysEx truncation is CLOSED, not a v2 candidate -- 10 September 2026
 
 tjingboem, comparing MidiLog against MIDI-OX as a reference analytic
 tool: "I do think... that Sysex partially and MIDI Time Code, Song
 Position Pointer, or realtime transport messages (Clock/Start/Stop)
 are not reported. Midiox does show these." Confirmed true by reading
-the actual code, not assumed -- and confirmed these messages
-genuinely reach this JSFX in real use, not just in theory, so this
-isn't dead-code-avoidance territory. Explicitly deferred to v2 by
+the actual code, not assumed. **Follow-up the same day split this into
+two different calls, not one combined item:**
+
+**SysEx truncation: CLOSED, working as intended, not a gap.**
+tjingboem's own reasoning, and it's a real scope decision, not a
+missed edge case: "MidiLog should do one thing, and that is logging.
+But i realize that it would take to far when a whole sysex message is
+displayed... Sysex messages can be seen in Reaper itself." Full SysEx
+inspection is REAPER's own job (its MIDI Event List already shows
+complete SysEx content) -- MidiLog showing the first 8 bytes plus the
+true total length is enough to confirm "something happened here,
+here's roughly what," without turning this into a second SysEx
+inspector. **Reverses the "bigger, structural change" framing below**
+-- not because the fix got easier, but because it's no longer wanted
+at all.
+
+**System Common/Realtime: still the real v2 item, now with a clear
+reason why, not just "MIDI-OX shows it."** tjingboem: "yes, that is
+something that MidiLog should show, so the user can make decisions
+based on this information." Confirmed these messages genuinely reach
+this JSFX in real use, not just in theory, so this isn't
+dead-code-avoidance territory either. Explicitly deferred to v2 by
 tjingboem's own call, same "feels like a version 2 thing to me"
 treatment as the Load Capture idea above -- not started.
 
@@ -909,15 +928,6 @@ treatment as the Load Capture idea above -- not started.
   `midisend_buf`, just never written into the log. The comment's own
   wording ("not logged **for now**") already reads as deferred, not
   permanent.
-- **SysEx is truncated at exactly 8 bytes, in storage, not just
-  display.** `ent_sysex_cnt` records the true length, but only 8 bytes
-  of actual payload are ever captured (two 32-bit array slots per
-  entry, per the code's own comment). A short SysEx message is fully
-  captured; a long one (e.g. a patch dump) is silently missing
-  everything past its 8th byte, both on screen and in Export. Fixing
-  this means widening the per-entry storage layout, not just a loop
-  bound -- a bigger, structural change compared to adding the missing
-  message types.
 
 **Confirmed these messages actually arrive in real use, via a real
 forum account of a near-identical logger JSFX** (`forum.cockos.com/
@@ -947,5 +957,24 @@ $xF1` skip branch first (`MidiLog.jsfx`, in the main capture loop) --
 that's exactly where the new per-status-byte handling would replace
 the current no-op skip, split into "log as one row" (System Common)
 vs. "collapse to a presence indicator, don't log per-event" (Active
-Sensing, Clock) vs. "leave the storage-layout question for its own
-pass" (SysEx beyond 8 bytes).
+Sensing, Clock). SysEx's own 8-byte cap is out of scope for this pass
+entirely now -- see the CLOSED note above, don't touch it as part of
+this work.
+
+**Real testing-access constraint, same day tjingboem raised it:** "i
+have no direct access to System Common/Realtime." Most of this set is
+still testable without needing hardware, though, since REAPER can
+generate it itself: MIDI Clock, Start/Stop/Continue, and Song Position
+Pointer can all be sent by REAPER's own transport (Preferences > MIDI
+Devices, the sync-output options), routed to a virtual/loopback MIDI
+port and back into a track hosting MidiLog -- a genuine, self-contained
+test signal, no external device required. MTC the same way. **Active
+Sensing is the one real exception** -- it's a hardware keep-alive a
+physical controller sends on its own initiative, not something
+REAPER's transport generates, so it needs either a real device
+confirmed to send it (a prior forum account, possibly tjingboem's own,
+mentions a Yamaha keyboard doing this -- see above), or a synthetic
+stand-in test. Whether any of tjingboem's own current gear sends
+Active Sensing is unconfirmed as of this writing -- worth checking
+before this feature is built, not discovering as a surprise blocker
+during testing.
